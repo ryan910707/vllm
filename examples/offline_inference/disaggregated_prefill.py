@@ -38,9 +38,10 @@ def run_prefill(prefill_done):
 
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.
-    llm = LLM(model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+    llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
               kv_transfer_config=ktc,
               max_model_len=2000,
+              dtype="half",
               gpu_memory_utilization=0.8)
 
     llm.generate(prompts, sampling_params)
@@ -77,9 +78,10 @@ def run_decode(prefill_done):
 
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.
-    llm = LLM(model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+    llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
               kv_transfer_config=ktc,
               max_model_len=2000,
+              dtype= "half",
               gpu_memory_utilization=0.8)
 
     # Wait for the producer to start the pipe
