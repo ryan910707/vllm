@@ -11,6 +11,12 @@ from multiprocessing import Event, Process
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 
+prompts = [
+        "how are you",
+        "Hello my name is",
+        # The decode node will actually "prefill" this request.
+        "Tell me a very long story",
+    ]
 
 def run_prefill(prefill_done):
     # We use GPU 0 for prefill node.
@@ -20,12 +26,7 @@ def run_prefill(prefill_done):
     # three requests. So the decode node will only receive the KV Cache for
     # requests 1 and 3. The decode node will use the KV Cache of requests 1
     # and 3 and do prefilling on request 2.
-    prompts = [
-        "Hello, my name is",
-        "Hi, your name is",
-        # The decode node will actually "prefill" this request.
-        "Tell me a very long story",
-    ]
+    
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
 
     # Using PyNcclConnector to transmit KV caches between vLLM instances.
@@ -61,11 +62,6 @@ def run_decode(prefill_done):
     # We use GPU 1 for decode node.
     os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-    prompts = [
-        "Hello, my name is",
-        "Hi, your name is",
-        "Tell me a very long story",
-    ]
     sampling_params = SamplingParams(temperature=0, top_p=0.95)
 
     # Using PyNcclConnector to transmit KV caches between vLLM instances.

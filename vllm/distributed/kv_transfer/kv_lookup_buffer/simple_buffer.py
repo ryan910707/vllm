@@ -111,7 +111,7 @@ class SimpleBuffer(KVLookupBufferBase):
             key = key.clone()
         if isinstance(value, torch.Tensor):
             value = value.clone()
-        if isinstance(hidden, torch.Tensor):
+        if isinstance(hidden, torch.Tensor):   
             hidden = hidden.clone()
 
         buffer_item = [input_tokens, roi, key, value, hidden]
@@ -220,6 +220,7 @@ class SimpleBuffer(KVLookupBufferBase):
         # when calling the insert, the current process is a sender
         # need to launch the request handler and start listening to request.
         if self.request_handling_thread is None:
+            logger.debug("Launching request handler")
             self.request_handling_thread = threading.Thread(
                 target=self.drop_select_handler)
             self.request_handling_thread.start()
