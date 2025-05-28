@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-This file demonstrates the example usage of disaggregated prefilling
+Benchmark for original disaggregated prefill.
 We will launch 2 vllm instances (GPU 0 for prefill and GPU 1 for decode),
 and then transfer the KV cache between them.
+Under insufficient buffer size, the prefill node will be blocked.
+We can add nvtx range in simple_buffer.py to see the wait time.
 """
 import os
 import time
@@ -38,7 +40,7 @@ def run_prefill(prefill_done):
     # The number of parallel instances for KV cache transfer is set to 2,
     # as required for PyNcclConnector.
     ktc = KVTransferConfig.from_cli(
-        '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2, "kv_buffer_size":1e9}'
+        '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2, "kv_buffer_size":160000}'
     )
 
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB

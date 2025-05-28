@@ -1776,6 +1776,15 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     **seqlen_agnostic_kwargs,
                     **model_kwargs,
                 )
+            
+            # ryan: log the number of tokens processed
+            # if model_input.is_prompt:  # This is True for prefill steps
+            #     num_tokens_processed = model_input.input_tokens.numel() if model_input.input_tokens is not None else 0
+            #     logger.info(f"Prefill for {num_tokens_processed} tokens in the current batch is done.")
+            # elif not model_input.is_prompt and model_input.input_tokens is not None: # It's a decode step
+            #     # For decode, one token is typically processed per sequence.
+            #     num_decode_tokens = model_input.input_tokens.numel()
+            #     logger.info(f"Decode for {num_decode_tokens} tokens in the current batch is done.")
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
