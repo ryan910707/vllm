@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer import (
     SimpleBuffer)
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
+from vllm.vllm.distributed.kv_transfer.kv_lookup_buffer.cpu_buffer import CpuBuffer
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
@@ -66,8 +67,8 @@ class SimpleConnector(KVConnectorBase):
 
         self.lookup_buffer_size = self.config.kv_buffer_size
 
-        self.producer_buffer: Optional[SimpleBuffer] = None
-        self.consumer_buffer: Optional[SimpleBuffer] = None
+        self.producer_buffer: Union[SimpleBuffer, CpuBuffer] = None
+        self.consumer_buffer: Union[SimpleBuffer, CpuBuffer] = None
 
         self.producer_data_pipe: Union[PyNcclPipe, MooncakePipe]
         self.consumer_data_pipe: Union[PyNcclPipe, MooncakePipe]
@@ -101,7 +102,12 @@ class SimpleConnector(KVConnectorBase):
                 # We only need to initialize MooncakePipe once
                 self.producer_signal_pipe = self.producer_data_pipe
 
-            self.producer_buffer = SimpleBuffer(self.producer_signal_pipe,
+            if self.config.kv_buffer_device == "cuda":
+                self.producer_buffer = SimpleBuffer(self.producer_signal_pipe,
+                                                    self.producer_data_pipe,
+                                                    self.config.kv_buffer_size)
+            elif self.config.kv_buffer_device == "cpu":
+                self.producer_buffer = CpuBuffer(self.producer_signal_pipe,
                                                 self.producer_data_pipe,
                                                 self.config.kv_buffer_size)
 
@@ -128,11 +134,18 @@ class SimpleConnector(KVConnectorBase):
                 )
                 self.consumer_signal_pipe = self.consumer_data_pipe
 
-            self.consumer_buffer = SimpleBuffer(
-                self.consumer_signal_pipe,
-                self.consumer_data_pipe,
-                self.config.kv_buffer_size,
-            )
+            if self.config.kv_buffer_device == "cuda":
+                self.consumer_buffer = SimpleBuffer(
+                    self.consumer_signal_pipe,
+                    self.consumer_data_pipe,
+                    self.config.kv_buffer_size,
+                )
+            elif self.config.kv_buffer_device == "cpu":
+                self.consumer_buffer = CpuBuffer(
+                    self.consumer_signal_pipe,
+                    self.consumer_data_pipe,
+                    self.config.kv_buffer_size,
+                )
 
     def select(self, input_tokens: Optional[torch.Tensor],
                roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
