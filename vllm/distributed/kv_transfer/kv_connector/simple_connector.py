@@ -16,11 +16,8 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer import (
-    SimpleBuffer)
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
-from vllm.vllm.distributed.kv_transfer.kv_lookup_buffer.cpu_buffer import CpuBuffer
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
@@ -64,6 +61,17 @@ class SimpleConnector(KVConnectorBase):
                 logger.info(
                     "Initializing MooncakeConfig under kv_transfer_config %s",
                     self.config)
+                
+        if self.config.kv_buffer_device == "cuda":
+            from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer import (
+                SimpleBuffer)
+            logger.info(
+                "Initializing SimpleBuffer")
+        elif self.config.kv_buffer_device == "cpu":
+            from vllm.distributed.kv_transfer.kv_lookup_buffer.cpu_buffer import CpuBuffer
+            logger.info("Initializing CpuBuffer")
+        else:
+            raise ValueError(f"Invalid kv_buffer_device: {self.config.kv_buffer_device}")
 
         self.lookup_buffer_size = self.config.kv_buffer_size
 

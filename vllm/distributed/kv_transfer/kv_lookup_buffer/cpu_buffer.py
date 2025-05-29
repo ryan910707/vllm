@@ -36,7 +36,7 @@ class CpuBuffer(KVLookupBufferBase):
         KV cache. Luckily CPU recv only blocks the current thread so we use
         CPU recv to listen to new request.
 
-        data_pipe: on CPU
+        data_pipe: on CPU (expects a pipe configured for CPU tensor transfer)
         """
 
         self.buffer: Deque[List[torch.Tensor]] = deque()
@@ -105,15 +105,15 @@ class CpuBuffer(KVLookupBufferBase):
                        hidden: torch.Tensor):
 
         if isinstance(input_tokens, torch.Tensor):
-            input_tokens = input_tokens.clone()
+            input_tokens = input_tokens.clone().cpu()
         if isinstance(roi, torch.Tensor):
-            roi = roi.clone()
+            roi = roi.clone().cpu()
         if isinstance(key, torch.Tensor):
-            key = key.clone()
+            key = key.clone().cpu()
         if isinstance(value, torch.Tensor):
-            value = value.clone()
+            value = value.clone().cpu()
         if isinstance(hidden, torch.Tensor):   
-            hidden = hidden.clone()
+            hidden = hidden.clone().cpu()
 
         buffer_item = [input_tokens, roi, key, value, hidden]
         data_size = sum([self._get_element_size(data) for data in buffer_item])
@@ -123,12 +123,8 @@ class CpuBuffer(KVLookupBufferBase):
                 # log outside the while loop to avoid this message being logged
                 # repeatedly.
                 logger.debug("KV transfer buffer is full. Handling...")
-                # start_time = time.time()
-                # torch.cuda.nvtx.range_push("KV transfer buffer wait")
                 while self.buffer_size + data_size > self.buffer_size_threshold:
                     self.buffer_cv.wait()
-                # torch.cuda.nvtx.range_pop()
-                # wait_time = time.time() - start_time
                 logger.debug(f"KV transfer buffer wait end")
 
             self.buffer_size += data_size
@@ -214,6 +210,18 @@ class CpuBuffer(KVLookupBufferBase):
         key = self.data_pipe.recv_tensor()
         value = self.data_pipe.recv_tensor()
         hidden = self.data_pipe.recv_tensor()
+
+        # move tensors to GPU
+        if isinstance(input_tokens, torch.Tensor):
+            input_tokens = input_tokens.cuda()
+        if isinstance(roi, torch.Tensor):
+            roi = roi.cuda()
+        if isinstance(key, torch.Tensor):
+            key = key.cuda()
+        if isinstance(value, torch.Tensor):
+            value = value.cuda()
+        if isinstance(hidden, torch.Tensor):
+            hidden = hidden.cuda()
 
         return [input_tokens, roi, key, value, hidden]
 

@@ -15,11 +15,10 @@ from vllm.config import KVTransferConfig
 
 
 prompts = [
-        "The cat sat on mat",
-        "Five dogs ran past me", 
-        "She walked through the door",
-        "He jumped over the fence",
-        "They danced in the rain",
+        "Hello, my name is",
+        "Hi, your name is",
+        # The decode node will actually "prefill" this request.
+        "Tell me a very long story",
     ]
 
 def run_prefill(prefill_done):
@@ -38,7 +37,7 @@ def run_prefill(prefill_done):
     # The number of parallel instances for KV cache transfer is set to 2,
     # as required for PyNcclConnector.
     ktc = KVTransferConfig.from_cli(
-        '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2, "kv_buffer_size":1e9}'
+        '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}'
     )
 
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
@@ -69,14 +68,14 @@ def run_decode(prefill_done):
     # We use GPU 1 for decode node.
     os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-    sampling_params = SamplingParams(temperature=0, top_p=0.95, min_tokens=90, max_tokens=100)
+    sampling_params = SamplingParams(temperature=0, top_p=0.95)
 
     # Using PyNcclConnector to transmit KV caches between vLLM instances.
     # This instance is the decode node (kv_consumer, rank 1).
     # The number of parallel instances for KV cache transfer is set to 2,
     # as required for PyNcclConnector.
     ktc = KVTransferConfig.from_cli(
-        '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2, "kv_buffer_size":160000}'
+        '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2}'
     )
 
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB

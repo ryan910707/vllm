@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Benchmark for original disaggregated prefill under insufficient buffer size.
-We will launch 2 vllm instances (GPU 0 for prefill and GPU 1 for decode),
-and then transfer the KV cache between them.
-Under insufficient buffer size, the prefill node will be blocked.
-We can add nvtx range in simple_buffer.py to see the wait time.
-Buffer size is set to 160000. for 5 tokens.(5*31753)
+Benchmark against insufficient_gpu_buffer_benchmark.py.
+In this benchmark, we will use cpu as buffer device.
+Will create a sufficient large buffer size.
 """
 import os
 import time
@@ -45,9 +42,9 @@ def run_prefill(prefill_done):
         kv_role="kv_producer",
         kv_rank=0,
         kv_parallel_size=2,
-        kv_buffer_size=160000,
+        kv_buffer_size=1e9,
+        kv_buffer_device="cpu"
     )
-
 
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.
@@ -88,9 +85,9 @@ def run_decode(prefill_done):
         kv_role="kv_consumer",
         kv_rank=1,
         kv_parallel_size=2,
-        kv_buffer_size=160000,
+        kv_buffer_size=1e9,
+        kv_buffer_device="cpu"
     )
-
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.
     llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
