@@ -22,7 +22,7 @@ prompts = [
         "They danced in the rain",
     ]
 
-def run_prefill(prefill_done):
+def run_prefill():
     # We use GPU 0 for prefill node.
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
@@ -42,7 +42,6 @@ def run_prefill(prefill_done):
         kv_role="kv_producer",
         kv_rank=0,
         kv_parallel_size=2,
-        kv_buffer_size=1e9,
         kv_buffer_device="cpu"
     )
 
@@ -70,7 +69,7 @@ def run_prefill(prefill_done):
         print("Script stopped by user.")
 
 
-def run_decode(prefill_done):
+def run_decode():
     # We use GPU 1 for decode node.
     os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
@@ -85,7 +84,6 @@ def run_decode(prefill_done):
         kv_role="kv_consumer",
         kv_rank=1,
         kv_parallel_size=2,
-        kv_buffer_size=1e9,
         kv_buffer_device="cpu"
     )
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
@@ -116,13 +114,12 @@ def run_decode(prefill_done):
 
 
 if __name__ == "__main__":
-    prefill_done = Event()
-    prefill_process = Process(target=run_prefill, args=(prefill_done, ))
-    decode_process = Process(target=run_decode, args=(prefill_done, ))
+    prefill_process = Process(target=run_prefill)
+    decode_process = Process(target=run_decode)
 
     # Start prefill node
-    decode_process.start()
     prefill_process.start()
+    decode_process.start()
 
     # Start decode node
 

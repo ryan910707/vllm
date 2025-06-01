@@ -74,7 +74,8 @@ class CpuBuffer(KVLookupBufferBase):
 
         # simple common prefix matching
         min_length = min(len(tokens_sender), len(tokens_recver))
-        if torch.allclose(tokens_sender[:min_length],
+        # If we are using CPU buffer, we sould move the tensors so that allclose() works.
+        if torch.allclose(tokens_sender[:min_length].cuda(),
                           tokens_recver[:min_length]):
             return min_length
 
@@ -104,6 +105,7 @@ class CpuBuffer(KVLookupBufferBase):
                        key: torch.Tensor, value: torch.Tensor,
                        hidden: torch.Tensor):
 
+        torch.cuda.nvtx.range_push("tensor clone")
         if isinstance(input_tokens, torch.Tensor):
             input_tokens = input_tokens.clone().cpu()
         if isinstance(roi, torch.Tensor):
@@ -114,6 +116,7 @@ class CpuBuffer(KVLookupBufferBase):
             value = value.clone().cpu()
         if isinstance(hidden, torch.Tensor):   
             hidden = hidden.clone().cpu()
+        torch.cuda.nvtx.range_pop()
 
         buffer_item = [input_tokens, roi, key, value, hidden]
         data_size = sum([self._get_element_size(data) for data in buffer_item])
@@ -210,18 +213,6 @@ class CpuBuffer(KVLookupBufferBase):
         key = self.data_pipe.recv_tensor()
         value = self.data_pipe.recv_tensor()
         hidden = self.data_pipe.recv_tensor()
-
-        # move tensors to GPU
-        if isinstance(input_tokens, torch.Tensor):
-            input_tokens = input_tokens.cuda()
-        if isinstance(roi, torch.Tensor):
-            roi = roi.cuda()
-        if isinstance(key, torch.Tensor):
-            key = key.cuda()
-        if isinstance(value, torch.Tensor):
-            value = value.cuda()
-        if isinstance(hidden, torch.Tensor):
-            hidden = hidden.cuda()
 
         return [input_tokens, roi, key, value, hidden]
 

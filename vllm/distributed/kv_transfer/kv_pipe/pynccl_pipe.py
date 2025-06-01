@@ -90,6 +90,7 @@ class PyNcclPipe(KVPipeBase):
         recv: Callable[[torch.Tensor, int], None]
         if self.device.type == "cuda":
             # use PyNCCL for send / recv
+            logger.info("Using PyNCCL for send / recv")
             comm = PyNcclCommunicator(group, device=self.local_rank)
             comm.disabled = False
             send, recv = comm.send, comm.recv  # type: ignore
@@ -98,6 +99,7 @@ class PyNcclPipe(KVPipeBase):
             # KV caches (and should NOT be repurposed to transfer KV caches).
             # Currently it is only used to transmit control-plane messages
             # for PyNcclBuffer.
+            logger.info("Using CPU for send / recv")
             send = group.send_obj
 
             def my_recv(x, src):
@@ -108,7 +110,6 @@ class PyNcclPipe(KVPipeBase):
         return send, recv
 
     def _select_device(self, device: str):
-        logger.info("Selecting device: %s", device)
         if device == "cuda":
             return torch.device(f"cuda:{self.local_rank}")
         else:

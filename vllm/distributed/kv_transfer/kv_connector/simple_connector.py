@@ -95,6 +95,7 @@ class SimpleConnector(KVConnectorBase):
                     local_rank=local_rank,
                     config=self.config,
                     port_offset=port_offset_base,
+                    device="cuda"
                 )
                 self.producer_signal_pipe = PyNcclPipe(
                     local_rank=local_rank,
@@ -128,6 +129,7 @@ class SimpleConnector(KVConnectorBase):
                     local_rank=local_rank,
                     config=self.config,
                     port_offset=port_offset_base,
+                    device="cuda"
                 )
                 self.consumer_signal_pipe = PyNcclPipe(
                     local_rank=local_rank,

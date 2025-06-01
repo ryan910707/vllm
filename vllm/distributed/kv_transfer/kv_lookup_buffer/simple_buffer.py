@@ -104,6 +104,7 @@ class SimpleBuffer(KVLookupBufferBase):
                        key: torch.Tensor, value: torch.Tensor,
                        hidden: torch.Tensor):
 
+        torch.cuda.nvtx.range_push("tensor clone")
         if isinstance(input_tokens, torch.Tensor):
             input_tokens = input_tokens.clone()
         if isinstance(roi, torch.Tensor):
@@ -114,6 +115,7 @@ class SimpleBuffer(KVLookupBufferBase):
             value = value.clone()
         if isinstance(hidden, torch.Tensor):   
             hidden = hidden.clone()
+        torch.cuda.nvtx.range_pop()
 
         buffer_item = [input_tokens, roi, key, value, hidden]
         data_size = sum([self._get_element_size(data) for data in buffer_item])
@@ -123,12 +125,10 @@ class SimpleBuffer(KVLookupBufferBase):
                 # log outside the while loop to avoid this message being logged
                 # repeatedly.
                 logger.debug("KV transfer buffer is full. Handling...")
-                # start_time = time.time()
-                # torch.cuda.nvtx.range_push("KV transfer buffer wait")
+                torch.cuda.nvtx.range_push("KV transfer buffer wait")
                 while self.buffer_size + data_size > self.buffer_size_threshold:
                     self.buffer_cv.wait()
-                # torch.cuda.nvtx.range_pop()
-                # wait_time = time.time() - start_time
+                torch.cuda.nvtx.range_pop()
                 logger.debug(f"KV transfer buffer wait end")
 
             self.buffer_size += data_size
@@ -191,6 +191,8 @@ class SimpleBuffer(KVLookupBufferBase):
     def drop_select(
             self, input_tokens: Optional[torch.Tensor],
             roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
+        
+        torch.cuda.nvtx.range_push("drop_select")
 
         assert self.request_handling_thread is None, \
             "drop_select should be called by the KV cache consumer "\
@@ -214,6 +216,8 @@ class SimpleBuffer(KVLookupBufferBase):
         key = self.data_pipe.recv_tensor()
         value = self.data_pipe.recv_tensor()
         hidden = self.data_pipe.recv_tensor()
+
+        torch.cuda.nvtx.range_pop()
 
         return [input_tokens, roi, key, value, hidden]
 
