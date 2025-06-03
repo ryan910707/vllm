@@ -74,9 +74,10 @@ class SimpleBuffer(KVLookupBufferBase):
 
         # simple common prefix matching
         min_length = min(len(tokens_sender), len(tokens_recver))
-        if torch.allclose(tokens_sender[:min_length],
-                          tokens_recver[:min_length]):
-            return min_length
+        with torch.cuda.nvtx.range("allclose"):
+            if torch.allclose(tokens_sender[:min_length],
+                            tokens_recver[:min_length]):
+                return min_length
 
         return 0
 

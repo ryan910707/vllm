@@ -178,10 +178,13 @@ class PyNcclPipe(KVPipeBase):
         """
         metadata = self._make_metadata(tensor)
         self._send_metadata(metadata)
+        
+        torch.cuda.nvtx.range_push("send_tensor")
         if tensor is not None:
             self.device_send_func(tensor.to(self.device),
-                                  self.target_rank_for_send)
-
+                                self.target_rank_for_send)
+        torch.cuda.nvtx.range_pop()
+        
     def _recv_impl(self) -> Optional[torch.Tensor]:
         """
         The actual implementation of receiving a tensor and its metadata from

@@ -36,7 +36,7 @@ class CpuBuffer(KVLookupBufferBase):
         KV cache. Luckily CPU recv only blocks the current thread so we use
         CPU recv to listen to new request.
 
-        data_pipe: on CPU (expects a pipe configured for CPU tensor transfer)
+        data_pipe: on GPU 
         """
 
         self.buffer: Deque[List[torch.Tensor]] = deque()
@@ -75,9 +75,10 @@ class CpuBuffer(KVLookupBufferBase):
         # simple common prefix matching
         min_length = min(len(tokens_sender), len(tokens_recver))
         # If we are using CPU buffer, we sould move the tensors so that allclose() works.
-        if torch.allclose(tokens_sender[:min_length].cuda(),
-                          tokens_recver[:min_length]):
-            return min_length
+        with torch.cuda.nvtx.range("allclose"):
+            if torch.allclose(tokens_sender[:min_length].cuda(),
+                            tokens_recver[:min_length]):
+                return min_length
 
         return 0
 
@@ -190,7 +191,8 @@ class CpuBuffer(KVLookupBufferBase):
     def drop_select(
             self, input_tokens: Optional[torch.Tensor],
             roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
-
+        
+        torch.cuda.nvtx.range_push("drop_select")
         assert self.request_handling_thread is None, \
             "drop_select should be called by the KV cache consumer "\
             "(e.g. the decode vLLM instance)"
@@ -213,7 +215,8 @@ class CpuBuffer(KVLookupBufferBase):
         key = self.data_pipe.recv_tensor()
         value = self.data_pipe.recv_tensor()
         hidden = self.data_pipe.recv_tensor()
-
+        torch.cuda.nvtx.range_pop()
+        
         return [input_tokens, roi, key, value, hidden]
 
     def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
