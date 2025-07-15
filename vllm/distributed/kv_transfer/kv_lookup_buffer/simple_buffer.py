@@ -74,10 +74,10 @@ class SimpleBuffer(KVLookupBufferBase):
 
         # simple common prefix matching
         min_length = min(len(tokens_sender), len(tokens_recver))
-        with torch.cuda.nvtx.range("allclose"):
-            if torch.allclose(tokens_sender[:min_length],
-                            tokens_recver[:min_length]):
-                return min_length
+
+        if torch.allclose(tokens_sender[:min_length],
+                        tokens_recver[:min_length]):
+            return min_length
 
         return 0
 
@@ -105,7 +105,6 @@ class SimpleBuffer(KVLookupBufferBase):
                        key: torch.Tensor, value: torch.Tensor,
                        hidden: torch.Tensor):
 
-        torch.cuda.nvtx.range_push("tensor clone")
         if isinstance(input_tokens, torch.Tensor):
             input_tokens = input_tokens.clone()
         if isinstance(roi, torch.Tensor):
@@ -116,7 +115,6 @@ class SimpleBuffer(KVLookupBufferBase):
             value = value.clone()
         if isinstance(hidden, torch.Tensor):   
             hidden = hidden.clone()
-        torch.cuda.nvtx.range_pop()
 
         buffer_item = [input_tokens, roi, key, value, hidden]
         data_size = sum([self._get_element_size(data) for data in buffer_item])
@@ -217,6 +215,7 @@ class SimpleBuffer(KVLookupBufferBase):
         key = self.data_pipe.recv_tensor()
         value = self.data_pipe.recv_tensor()
         hidden = self.data_pipe.recv_tensor()
+        self.signal_pipe.send_tensor(self.end_signal)
 
         torch.cuda.nvtx.range_pop()
 
@@ -230,11 +229,11 @@ class SimpleBuffer(KVLookupBufferBase):
 
         # when calling the insert, the current process is a sender
         # need to launch the request handler and start listening to request.
-        if self.request_handling_thread is None:
-            logger.debug("Launching request handler")
-            self.request_handling_thread = threading.Thread(
-                target=self.drop_select_handler)
-            self.request_handling_thread.start()
+        logger.debug("Starting synchronous request handler")
+        torch.cuda.nvtx.range_push("drop_select_handler")
+        self.drop_select_handler()
+        torch.cuda.nvtx.range_pop()
+        logger.debug("Request handler completed")
 
     def close(self):
 
