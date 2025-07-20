@@ -58,14 +58,10 @@ def run_prefill():
         torch.cuda.nvtx.range_pop()
     
     print("Prefill node is finished with all prompts.")
-
-    # To keep the prefill node running in case the decode node is not done;
-    # otherwise, the script might exit prematurely, causing incomplete decoding.
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("Script stopped by user.")
+    
+    # Clean up and exit the prefill process
+    from vllm.distributed.parallel_state import finish_prefill
+    finish_prefill()
 
 
 def run_decode():
@@ -115,13 +111,10 @@ if __name__ == "__main__":
     prefill_process = Process(target=run_prefill)
     decode_process = Process(target=run_decode)
 
-    # Start prefill node
+    # Start both processes
     prefill_process.start()
     decode_process.start()
 
-    # Start decode node
-
-
-    # Terminate the prefill node when decode is finished
+    # Wait for both processes to finish
     decode_process.join()
-    prefill_process.terminate()
+    prefill_process.join()  # Prefill will exit cleanly now
