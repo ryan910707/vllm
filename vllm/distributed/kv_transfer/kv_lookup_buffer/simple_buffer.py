@@ -4,14 +4,15 @@
 
     Key Features:
     - Distributed KV cache transmission using PyNccl pipes.
-    - Non-blocking `insert`, blocking `drop_select`.
-    - Use CPU signal pipe to avoid racing condition
-    - Handles buffer size constraints and provide backpressure mechanism to
-      stop the prefill instance when the decode instance is slow.
+    - Push-based transfer: producer immediately sends KV to consumer's buffer
+    - Non-blocking `insert`, non-blocking `drop_select`.
+    - Use CPU signal pipe to coordinate transfer completion
+    - Producer can exit after finishing all requests without waiting
 """
 import threading
 from collections import deque
 import time
+import queue
 from typing import Deque, List, Optional, Union
 
 import torch
@@ -30,13 +31,12 @@ class SimpleBuffer(KVLookupBufferBase):
                  buffer_size_thresh: float):
         """
         signal_pipe: on CPU
-
-        NOTE: on-device recv will block all threads in the process, making the
-        KV cache producer unable to listen to new request while transmitting
-        KV cache. Luckily CPU recv only blocks the current thread so we use
-        CPU recv to listen to new request.
-
         data_pipe: on device (e.g. GPU)
+        
+        In push mode:
+        - Producer creates threads to push KV to consumer buffer
+        - Consumer receives KV in background and stores locally
+        - drop_select fetches from local buffer
         """
 
         self.buffer: Deque[List[torch.Tensor]] = deque()
@@ -46,7 +46,14 @@ class SimpleBuffer(KVLookupBufferBase):
         self.buffer_cv = threading.Condition()
         self.signal_pipe = signal_pipe
         self.data_pipe = data_pipe
-        self.request_handling_thread: Optional[threading.Thread] = None
+        self.receive_thread: Optional[threading.Thread] = None
+        self.is_consumer = False
+        self.is_receiving = False
+
+        # Queue-based push mechanism to prevent race conditions
+        self.push_queue: queue.Queue = queue.Queue()
+        self.push_worker_thread: Optional[threading.Thread] = None
+        self.push_worker_running = False
 
         self.normal_signal = torch.tensor([0], device="cpu")
         self.end_signal = None
@@ -80,15 +87,6 @@ class SimpleBuffer(KVLookupBufferBase):
             return min_length
 
         return 0
-
-    def _send_tensor_and_dec_size(self,
-                                  tensor: Optional[torch.Tensor]) -> None:
-
-        assert tensor is not None, "Use self.data_pipe.send(None) instead"
-        self.buffer_size -= tensor.element_size() * tensor.numel()
-        if tensor.dtype == torch.bool:
-            tensor = tensor.float()
-        self.data_pipe.send_tensor(tensor)
 
     def _get_element_size(self, data: Optional[Union[List, torch.Tensor]]):
 
@@ -137,111 +135,231 @@ class SimpleBuffer(KVLookupBufferBase):
     def _is_end_signal(self, signal):
         return signal is None
 
-    def drop_select_handler(self):
+    def _start_push_worker(self):
+        """Start the push worker thread to handle sequential KV sending"""
+        if self.push_worker_thread is not None and self.push_worker_thread.is_alive():
+            return  # Worker already running
+            
+        self.push_worker_running = True
+        
+        def push_worker():
+            """Worker thread that processes the push queue sequentially"""
+            logger.debug("Push worker thread started")
+            
+            while self.push_worker_running:
+                try:
+                    # Wait for KV data to send (with timeout to check shutdown)
+                    kv_data = self.push_queue.get(timeout=1.0)
+                    
+                    if kv_data is None:  # Shutdown signal
+                        break
+                        
+                    # Send KV data atomically
+                    input_tokens, roi, key, value, hidden = kv_data
+                    self._send_kv_data_atomic(input_tokens, roi, key, value, hidden)
+                    
+                    # Mark task as done
+                    self.push_queue.task_done()
+                    
+                except queue.Empty:
+                    # Timeout occurred, continue to check shutdown
+                    continue
+                except Exception as e:
+                    logger.error(f"Error in push worker: {e}")
+                    # Continue processing other items
+                    continue
+            
+            logger.debug("Push worker thread finished")
+        
+        self.push_worker_thread = threading.Thread(target=push_worker, daemon=True)
+        self.push_worker_thread.start()
 
+    def _send_kv_data_atomic(self, input_tokens: torch.Tensor, roi: torch.Tensor,
+                            key: torch.Tensor, value: torch.Tensor, 
+                            hidden: torch.Tensor):
+        """Atomically send KV data to consumer (called by push worker)"""
         try:
+            torch.cuda.nvtx.range_push("send_kv_data_atomic")
+            
+            # Send signal to indicate incoming KV data
+            self.signal_pipe.send_tensor(self.normal_signal)
+            
+            # Send the KV data atomically
+            self.data_pipe.send_tensor(input_tokens)
+            self.data_pipe.send_tensor(roi.float() if roi is not None else roi)
+            self.data_pipe.send_tensor(key)
+            self.data_pipe.send_tensor(value)
+            self.data_pipe.send_tensor(hidden)
+            
+            torch.cuda.nvtx.range_pop()
+            logger.debug("Successfully sent KV cache to consumer")
+            
+        except Exception as e:
+            logger.error(f"Error sending KV cache to consumer: {e}")
+            raise  # Re-raise so push worker can handle it
 
-            while True:
-                signal = self.signal_pipe.recv_tensor()
-                if self._is_end_signal(signal):
-                    logger.info("Received end signal!")
+    def receive_handler(self):
+        """Consumer-side handler to receive pushed KV caches"""
+        try:
+            torch.cuda.nvtx.range_push("receive_handler")
+            logger.debug("Starting receive handler for pushed KV caches")
+            
+            while self.is_receiving:
+                try:
+                    # Wait for signal indicating incoming data
+                    signal = self.signal_pipe.recv_tensor()
+                    if self._is_end_signal(signal):
+                        logger.info("Received end signal in receive handler!")
+                        break
+                    
+                    # Receive the KV data
+                    input_tokens = self.data_pipe.recv_tensor()
+                    roi = self.data_pipe.recv_tensor()
+                    if roi is not None:
+                        roi = (roi > 0.5)  # Convert back to bool
+                    key = self.data_pipe.recv_tensor()
+                    value = self.data_pipe.recv_tensor()
+                    hidden = self.data_pipe.recv_tensor()
+                    
+                    # Add to local buffer
+                    self._add_to_buffer(input_tokens, roi, key, value, hidden)
+                    logger.info("Received and buffered KV cache from producer")
+                    
+                except (RuntimeError, torch.distributed.DistNetworkError) as e:
+                    if any(msg in str(e) for msg in ['Connection closed by peer', 'Connection reset by peer']):
+                        logger.debug("Connection closed by peer, stopping receive handler")
+                        break
+                    else:
+                        logger.error(f"Error in receive handler: {e}")
+                        break
+                except Exception as e:
+                    logger.error(f"Unexpected error in receive handler: {e}")
                     break
+                        
+            torch.cuda.nvtx.range_pop()
+            
+        except Exception as e:
+            logger.error(f"Fatal error in receive handler: {e}")
+        finally:
+            logger.debug("Receive handler finished")
 
-                input_tokens = self.data_pipe.recv_tensor()
-
-                roi = self.data_pipe.recv_tensor()
-                assert roi is not None, "Please provide the roi when sending "\
-                    "drop-select request"
-                roi = (roi > 0.5)
-                tokens_roi_recver = [input_tokens, roi]
-
-                def is_buffer_available(
-                    tokens_roi_recver: List[torch.Tensor], ) -> bool:
-                    # perform input tokens and roi matching
-                    # FIXME: this matching is O(n), ideally it should be O(1)
-                    # but this buffer size won't (and shouldn't) be too large so
-                    # the fix is not urgent.
-                    for _ in range(len(self.buffer)):
-                        if self._matches(self.buffer[0],
-                                         tokens_roi_recver) > 0:
-                            return True
-                        # rotate the element we just accessed to the end
-                        self.buffer.rotate(-1)
-                    return False
-
-                with self.buffer_cv:
-                    while not is_buffer_available(tokens_roi_recver):
-                        logger.debug(
-                            "KV transfer buffer is not available. Waiting...")
-                        self.buffer_cv.wait()
-                    # need to clone the tensor
-                    # in case the tensor is freed before sending finishes
-                    matched_item = self.buffer.popleft()
-                    for tensor in matched_item:
-                        self._send_tensor_and_dec_size(tensor)
-                    self.buffer_cv.notify()
-
-        except RuntimeError as e:
-            if 'Connection closed by peer' not in str(e):
-                raise e
-
-        logger.debug("Closing drop_select_handler")
+    def start_consumer_mode(self):
+        """Start consumer mode to receive pushed KV caches"""
+        if not self.is_consumer:
+            self.is_consumer = True
+            self.is_receiving = True
+            self.receive_thread = threading.Thread(target=self.receive_handler, daemon=True)
+            self.receive_thread.start()
+            logger.debug("Started consumer mode with receive handler")
 
     def drop_select(
             self, input_tokens: Optional[torch.Tensor],
             roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
         
         torch.cuda.nvtx.range_push("drop_select")
+        
+        # Start consumer mode if not already started
+        if not self.is_consumer:
+            self.start_consumer_mode()
 
-        assert self.request_handling_thread is None, \
-            "drop_select should be called by the KV cache consumer "\
-            "(e.g. the decode vLLM instance)"
+        # Query the local buffer for matching KV cache
+        tokens_roi_recver = [input_tokens, roi]
+        
+        def is_buffer_available(tokens_roi_recver: List[torch.Tensor]) -> bool:
+            # perform input tokens and roi matching
+            for _ in range(len(self.buffer)):
+                if self._matches(self.buffer[0], tokens_roi_recver) > 0:
+                    return True
+                # rotate the element we just accessed to the end
+                self.buffer.rotate(-1)
+            return False
 
-        if isinstance(input_tokens, torch.Tensor):
-            input_tokens = input_tokens.clone()
-        if isinstance(roi, torch.Tensor):
-            roi = roi.clone().float()
-
-        self.signal_pipe.send_tensor(self.normal_signal)
-        self.data_pipe.send_tensor(input_tokens)
-        self.data_pipe.send_tensor(roi)
-
-        input_tokens = self.data_pipe.recv_tensor()
-        roi = self.data_pipe.recv_tensor()
-        if roi is not None:
-            # convert from float tensor to bool tensor
-            # as PyNccl does not support sending bool tensor
-            roi = (roi > 0.5)
-        key = self.data_pipe.recv_tensor()
-        value = self.data_pipe.recv_tensor()
-        hidden = self.data_pipe.recv_tensor()
-        self.signal_pipe.send_tensor(self.end_signal)
+        with self.buffer_cv:
+            while not is_buffer_available(tokens_roi_recver):
+                logger.debug("KV transfer buffer is not available. Waiting...")
+                torch.cuda.nvtx.range_push("drop_select_wait")
+                self.buffer_cv.wait()
+                torch.cuda.nvtx.range_pop()
+            
+            # Get matching item from local buffer
+            matched_item = self.buffer.popleft()
+            # Update buffer size
+            for tensor in matched_item:
+                if tensor is not None:
+                    self.buffer_size -= self._get_element_size(tensor)
+            self.buffer_cv.notify()
 
         torch.cuda.nvtx.range_pop()
-
-        return [input_tokens, roi, key, value, hidden]
+        return matched_item
 
     def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
                key: torch.Tensor, value: torch.Tensor,
                hidden: torch.Tensor) -> None:
-
-        self._add_to_buffer(input_tokens, roi, key, value, hidden)
-
-        # when calling the insert, the current process is a sender
-        # need to launch the request handler and start listening to request.
-        logger.debug("Starting synchronous request handler")
-        torch.cuda.nvtx.range_push("drop_select_handler")
-        self.drop_select_handler()
+        """
+        Producer-side insert: queue KV for sequential sending to prevent race conditions
+        """
+        torch.cuda.nvtx.range_push("insert_queue_mode")
+        
+        # Start push worker if not already running
+        if not self.push_worker_running:
+            self._start_push_worker()
+        
+        # Clone tensors to ensure they remain valid when sent
+        if isinstance(input_tokens, torch.Tensor):
+            input_tokens = input_tokens.clone()
+        if isinstance(roi, torch.Tensor):
+            roi = roi.clone()
+        if isinstance(key, torch.Tensor):
+            key = key.clone()
+        if isinstance(value, torch.Tensor):
+            value = value.clone()
+        if isinstance(hidden, torch.Tensor):
+            hidden = hidden.clone()
+        
+        # Queue the KV data for sequential sending by push worker
+        kv_data = (input_tokens, roi, key, value, hidden)
+        self.push_queue.put(kv_data)
+        
         torch.cuda.nvtx.range_pop()
-        logger.debug("Request handler completed")
+        logger.debug("KV cache queued for sending")
+
+    def signal_end(self):
+        """Signal that no more KV caches will be sent"""
+        try:
+            # Wait for all queued items to be processed
+            if self.push_worker_running:
+                logger.debug("Waiting for push queue to empty...")
+                self.push_queue.join()  # Wait for all items to be processed
+                
+            self.signal_pipe.send_tensor(self.end_signal)
+            logger.debug("Sent end signal to consumer")
+        except Exception as e:
+            logger.debug(f"Error sending end signal: {e}")
 
     def close(self):
-
-        if hasattr(self, "request_handling_thread"
-                   ) and self.request_handling_thread is not None:
-            self.request_handling_thread.join()
-
-        else:
-            # TODO: have a explicit close signal and have a explicit way to
-            # check if it's requester
-            self.signal_pipe.send_tensor(self.end_signal)
+        """Clean up resources"""
+        logger.info("Closing SimpleBuffer")
+        # Stop consumer receive thread
+        if self.is_consumer and self.is_receiving:
+            self.is_receiving = False
+            
+        if hasattr(self, "receive_thread") and self.receive_thread is not None:
+            logger.info("Closing receive thread")
+            self.receive_thread.join()
+        
+        # Stop producer push worker thread
+        if self.push_worker_running:
+            self.push_worker_running = False
+            
+            # Send shutdown signal to push worker
+            # self.push_queue.put(None)
+            
+            if hasattr(self, "push_worker_thread") and self.push_worker_thread is not None:
+                logger.info("Closing push worker thread")
+                self.push_worker_thread.join(timeout=5.0)
+                if self.push_worker_thread.is_alive():
+                    logger.warning("Push worker thread did not shutdown cleanly")
+            
+        # If this is a producer, signal end to consumer
+        # if not self.is_consumer:
+        #     self.signal_end()
