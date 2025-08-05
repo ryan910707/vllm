@@ -213,13 +213,13 @@ class SimpleBuffer(KVLookupBufferBase):
                         break
                     
                     # Receive the KV data
-                    input_tokens = self.data_pipe.recv_tensor()
-                    roi = self.data_pipe.recv_tensor()
+                    input_tokens = self.data_pipe.recv_tensor().cpu()
+                    roi = self.data_pipe.recv_tensor().cpu()
                     if roi is not None:
                         roi = (roi > 0.5)  # Convert back to bool
-                    key = self.data_pipe.recv_tensor()
-                    value = self.data_pipe.recv_tensor()
-                    hidden = self.data_pipe.recv_tensor()
+                    key = self.data_pipe.recv_tensor().cpu()
+                    value = self.data_pipe.recv_tensor().cpu()
+                    hidden = self.data_pipe.recv_tensor().cpu()
                     
                     # Add to local buffer
                     self._add_to_buffer(input_tokens, roi, key, value, hidden)
@@ -263,7 +263,10 @@ class SimpleBuffer(KVLookupBufferBase):
             self.start_consumer_mode()
 
         # Query the local buffer for matching KV cache
-        tokens_roi_recver = [input_tokens, roi]
+        tokens_roi_recver = [
+            input_tokens.cpu() if input_tokens is not None else None,
+            roi.cpu() if roi is not None else None
+        ]
         
         def is_buffer_available(tokens_roi_recver: List[torch.Tensor]) -> bool:
             # perform input tokens and roi matching
@@ -283,6 +286,9 @@ class SimpleBuffer(KVLookupBufferBase):
             
             # Get matching item from local buffer
             matched_item = self.buffer.popleft()
+            # Move matched items to GPU
+            matched_item = [item.cuda() if item is not None else None for item in matched_item]
+            
             # Update buffer size
             for tensor in matched_item:
                 if tensor is not None:
