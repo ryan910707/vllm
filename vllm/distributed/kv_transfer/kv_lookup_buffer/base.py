@@ -90,6 +90,30 @@ class KVLookupBufferBase(KVCacheBufferBase):
         """
         raise NotImplementedError
 
+    def insert_layer(self, input_tokens: torch.Tensor, roi: torch.Tensor,
+                    key: torch.Tensor, value: torch.Tensor,
+                    hidden: torch.Tensor, layer_id: int, total_layers: int) -> None:
+        """Insert a single layer into the lookup buffer (optional implementation).
+        
+        This method enables layer-wise KV cache transfer for better compute-communication
+        overlap. Implementations can choose to support this or fall back to batched insert.
+        
+        Args:
+            input_tokens (torch.Tensor): token IDs.
+            roi (torch.Tensor): A binary mask on top of the input tokens
+            key (torch.Tensor): The key tensor for this layer in the KV cache.
+            value (torch.Tensor): The value tensor for this layer in the KV cache.
+            hidden (torch.Tensor): The hidden state tensor (typically only meaningful for final layer).
+            layer_id (int): The ID of this layer (0-indexed).
+            total_layers (int): Total number of layers in the model.
+
+        Raises:
+            NotImplementedError: Default implementation should be overridden for layer-wise support.
+        """
+        # Default implementation: not all buffers need to support layer-wise transfer
+        # They can fall back to accumulating and using regular insert
+        raise NotImplementedError("Layer-wise insert not supported by this buffer implementation")
+
     @abstractmethod
     def drop_select(
             self, input_tokens: Optional[torch.Tensor],

@@ -173,6 +173,16 @@ class SimpleConnector(KVConnectorBase):
 
         self.producer_buffer.insert(input_tokens, roi, key, value, hidden)
 
+    def insert_layer(self, input_tokens: torch.Tensor, roi: torch.Tensor,
+                    key: torch.Tensor, value: torch.Tensor,
+                    hidden: torch.Tensor, layer_id: int, total_layers: int) -> None:
+        """Insert single layer KV cache for layer-wise transfer"""
+        
+        assert self.producer_buffer is not None, "Please initialize the "\
+            "producer buffer before calling insert_layer."
+
+        self.producer_buffer.insert_layer(input_tokens, roi, key, value, hidden, layer_id, total_layers)
+
     def send_kv_caches_and_hidden_states(
         self,
         model_executable: torch.nn.Module,
@@ -257,6 +267,95 @@ class SimpleConnector(KVConnectorBase):
                         hidden_or_intermediate_states[start_pos:end_pos])
 
         logger.debug("[rank%d]: KV send DONE.", torch.distributed.get_rank())
+
+    def send_kv_caches_and_hidden_states_layerwise(
+        self,
+        model_executable: torch.nn.Module,
+        model_input: "ModelInputForGPUWithSamplingMetadata",
+        kv_caches: List[torch.Tensor],
+        hidden_or_intermediate_states: Union[torch.Tensor,
+                                             IntermediateTensors],
+    ) -> None:
+        """
+        Layer-wise version of send_kv_caches_and_hidden_states that sends each layer 
+        immediately as it becomes available, enabling compute-communication overlap.
+        """
+
+        input_tokens_tensor = model_input.input_tokens
+        seq_lens = model_input.attn_metadata.seq_lens
+        slot_mapping_flat = model_input.attn_metadata.slot_mapping.flatten()
+        num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
+        start_layer = model_executable.model.start_layer
+        end_layer = model_executable.model.end_layer
+        total_layers = end_layer - start_layer
+
+        model_config = model_executable.model.config
+        num_heads = int(model_config.num_key_value_heads / self.tp_size)
+        hidden_size = model_config.hidden_size
+        num_attention_heads = model_config.num_attention_heads
+
+        # Handle different KV cache shapes for Deepseek MLA
+        if self.is_deepseek_mla and self.use_mla_opt:
+            head_size = model_config.kv_lora_rank + \
+                model_config.qk_rope_head_dim
+            num_heads = 1
+        elif self.is_deepseek_mla and not self.use_mla_opt:
+            head_size = model_config.qk_nope_head_dim + \
+                model_config.qk_rope_head_dim
+        else:
+            head_size = getattr(model_config, "head_dim",
+                                int(hidden_size // num_attention_heads))
+
+        # Process each sequence/request
+        for idx, slen in enumerate(seq_lens):
+            start_pos = sum(seq_lens[:idx])
+            end_pos = start_pos + slen
+
+            if start_pos >= num_prefill_tokens:
+                logger.warning("You have some decode requests while using "
+                               "SimpleConnector. Their KVCache won't be sent.")
+                break
+
+            current_tokens = input_tokens_tensor[start_pos:end_pos]
+            current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
+            
+            # Send each layer individually
+            for layer_idx, layer_id in enumerate(range(start_layer, end_layer)):
+                kv_cache = kv_caches[layer_idx]
+
+                # Extract key and value for this layer
+                if self.is_deepseek_mla and self.use_mla_opt:
+                    key_cache = kv_cache.reshape(-1, num_heads, head_size)
+                    value_cache = kv_cache.reshape(-1, num_heads, head_size)
+                else:
+                    key_cache = kv_cache[0].reshape(-1, num_heads, head_size)
+                    value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
+
+                # Get the KV for current sequence
+                layer_key = key_cache[current_slot_mapping].unsqueeze(0)
+                layer_value = value_cache[current_slot_mapping].unsqueeze(0)
+                
+                # For hidden states, only send meaningful data on final layer
+                if layer_idx == total_layers - 1:
+                    current_hidden = hidden_or_intermediate_states[start_pos:end_pos]
+                else:
+                    # Send empty tensor for non-final layers to maintain protocol
+                    current_hidden = torch.empty(0, device=layer_key.device)
+
+                # Send this layer immediately
+                self.insert_layer(
+                    current_tokens,
+                    torch.ones_like(current_tokens, dtype=bool),
+                    layer_key,
+                    layer_value,
+                    current_hidden,
+                    layer_id,
+                    total_layers
+                )
+                
+                logger.debug(f"[rank{torch.distributed.get_rank()}]: Sent layer {layer_id} for sequence {idx}")
+
+        logger.debug("[rank%d]: Layer-wise KV send DONE.", torch.distributed.get_rank())
 
     def recv_kv_caches_and_hidden_states(
         self, model_executable: torch.nn.Module,

@@ -2989,6 +2989,9 @@ class KVTransferConfig(BaseModel):
     # any extra config that the connector may need
     kv_connector_extra_config: dict[str, Any] = {}
 
+    # Whether to enable layer-wise KV cache transfer for compute-communication overlap
+    enable_layerwise_transfer: bool = False
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

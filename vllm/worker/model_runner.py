@@ -1767,15 +1767,36 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if not bypass_model_exec:
             with set_forward_context(model_input.attn_metadata,
                                      self.vllm_config, virtual_engine):
-                hidden_or_intermediate_states = model_executable(
-                    input_ids=model_input.input_tokens,
-                    positions=model_input.input_positions,
-                    intermediate_tensors=intermediate_tensors,
-                    **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
-                                                 device=self.device),
-                    **seqlen_agnostic_kwargs,
-                    **model_kwargs,
-                )
+                # Use layer-wise execution if enabled for true compute-communication overlap
+                if (self.vllm_config.kv_transfer_config and 
+                    self.vllm_config.kv_transfer_config.enable_layerwise_transfer and
+                    self.need_send_kv(model_input, kv_caches)):
+                    try:
+                        hidden_or_intermediate_states = self._execute_model_layerwise(
+                            model_executable, model_input, kv_caches, intermediate_tensors,
+                            multi_modal_kwargs, seqlen_agnostic_kwargs, model_kwargs
+                        )
+                    except Exception as e:
+                        logger.error(f"Layerwise execution failed: {e}, falling back to regular execution")
+                        hidden_or_intermediate_states = model_executable(
+                            input_ids=model_input.input_tokens,
+                            positions=model_input.input_positions,
+                            intermediate_tensors=intermediate_tensors,
+                            **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
+                                                         device=self.device),
+                            **seqlen_agnostic_kwargs,
+                            **model_kwargs,
+                        )
+                else:
+                    hidden_or_intermediate_states = model_executable(
+                        input_ids=model_input.input_tokens,
+                        positions=model_input.input_positions,
+                        intermediate_tensors=intermediate_tensors,
+                        **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
+                                                     device=self.device),
+                        **seqlen_agnostic_kwargs,
+                        **model_kwargs,
+                    )
             
             # ryan: log the number of tokens processed
             # if model_input.is_prompt:  # This is True for prefill steps
@@ -1793,15 +1814,28 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # Sending KV cache in distributed KV cache transfer setting
         # NOTE: the send operation is non-blocking
         if self.need_send_kv(model_input, kv_caches):
-            get_kv_transfer_group().send_kv_caches_and_hidden_states(
-                # model_executable is used to know which layer the current
-                # worker is working on, so that we can send KV for only those
-                # layers.
-                model_executable,
-                model_input,
-                kv_caches,
-                hidden_or_intermediate_states,
-            )
+            # Use layer-wise transfer if enabled for compute-communication overlap
+            if (self.vllm_config.kv_transfer_config and 
+                self.vllm_config.kv_transfer_config.enable_layerwise_transfer):
+                get_kv_transfer_group().send_kv_caches_and_hidden_states_layerwise(
+                    # model_executable is used to know which layer the current
+                    # worker is working on, so that we can send KV for only those
+                    # layers.
+                    model_executable,
+                    model_input,
+                    kv_caches,
+                    hidden_or_intermediate_states,
+                )
+            else:
+                get_kv_transfer_group().send_kv_caches_and_hidden_states(
+                    # model_executable is used to know which layer the current
+                    # worker is working on, so that we can send KV for only those
+                    # layers.
+                    model_executable,
+                    model_input,
+                    kv_caches,
+                    hidden_or_intermediate_states,
+                )
 
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
@@ -1919,6 +1953,176 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         return self.vllm_config.kv_transfer_config.is_kv_producer and (
             not is_profile_run) and is_prefill_run
+
+    def _execute_model_layerwise(
+        self,
+        model_executable: torch.nn.Module,
+        model_input: ModelInputForGPUWithSamplingMetadata,
+        kv_caches: List[torch.Tensor],
+        intermediate_tensors: Optional[IntermediateTensors],
+        multi_modal_kwargs: dict,
+        seqlen_agnostic_kwargs: dict,
+        model_kwargs: dict,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        """
+        Execute model layer-by-layer, sending KV caches immediately after each layer computation.
+        This enables true compute-communication overlap.
+        """
+        
+        # Get the actual model (unwrap if needed)
+        if hasattr(model_executable, 'model'):
+            model = model_executable.model
+        else:
+            model = model_executable
+            
+        # Check if this model supports layer-wise execution
+        if not hasattr(model, 'layers') or not hasattr(model, 'start_layer') or not hasattr(model, 'end_layer'):
+            # Fallback to regular execution for models that don't support it
+            return model_executable(
+                input_ids=model_input.input_tokens,
+                positions=model_input.input_positions,
+                intermediate_tensors=intermediate_tensors,
+                **MultiModalKwargs.as_kwargs(multi_modal_kwargs, device=self.device),
+                **seqlen_agnostic_kwargs,
+                **model_kwargs,
+            )
+        
+        # Prepare inputs similar to regular model forward
+        from vllm.distributed.parallel_state import get_pp_group
+        from vllm.sequence import IntermediateTensors
+        
+        if get_pp_group().is_first_rank:
+            if 'inputs_embeds' in model_kwargs and model_kwargs['inputs_embeds'] is not None:
+                hidden_states = model_kwargs['inputs_embeds']
+            else:
+                hidden_states = model.get_input_embeddings(model_input.input_tokens)
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+        
+        positions = model_input.input_positions
+        
+        # Execute layers one by one with immediate KV cache sending
+        for layer_idx, layer in enumerate(model.layers[model.start_layer:model.end_layer]):
+            # Compute this layer
+            hidden_states, residual = layer(positions, hidden_states, residual)
+            
+            # Send KV cache for this layer immediately after computation
+            global_layer_idx = model.start_layer + layer_idx
+            try:
+                self._send_layer_kv_cache_immediate(
+                    model_input, kv_caches, global_layer_idx, hidden_states, 
+                    is_final_layer=(layer_idx == len(model.layers[model.start_layer:model.end_layer]) - 1)
+                )
+            except Exception as e:
+                # Don't break the forward pass if KV sending fails
+                logger.warning(f"Failed to send layer {global_layer_idx} KV cache: {e}")
+        
+        # Handle pipeline parallel output
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({
+                "hidden_states": hidden_states,
+                "residual": residual
+            })
+        
+        # Apply final norm for last rank
+        if hasattr(model, 'norm'):
+            hidden_states, _ = model.norm(hidden_states, residual)
+        
+        return hidden_states
+
+    def _send_layer_kv_cache_immediate(
+        self,
+        model_input: ModelInputForGPUWithSamplingMetadata,
+        kv_caches: List[torch.Tensor],
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        is_final_layer: bool = False
+    ):
+        """Send KV cache for a single layer immediately after its computation"""
+        try:
+            # Safety checks
+            if layer_idx >= len(kv_caches):
+                return
+            
+            # Check if we have a KV transfer group
+            from vllm.distributed.kv_transfer.kv_transfer_agent import get_kv_transfer_group
+            kv_transfer_group = get_kv_transfer_group()
+            if kv_transfer_group is None:
+                return
+                
+            # Extract this layer's KV cache data (similar to send_kv_caches_and_hidden_states_layerwise)
+            input_tokens_tensor = model_input.input_tokens
+            seq_lens = model_input.attn_metadata.seq_lens
+            slot_mapping_flat = model_input.attn_metadata.slot_mapping.flatten()
+            num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
+            
+            # Get model config for KV cache extraction
+            model_config = self.model_config
+            num_heads = int(model_config.num_key_value_heads / self.tp_size)
+            hidden_size = model_config.hidden_size
+            num_attention_heads = model_config.num_attention_heads
+            
+            # Handle different KV cache shapes for Deepseek MLA  
+            is_deepseek_mla = getattr(self, 'is_deepseek_mla', False)
+            use_mla_opt = getattr(self, 'use_mla_opt', False)
+            if is_deepseek_mla and use_mla_opt:
+                head_size = model_config.kv_lora_rank + model_config.qk_rope_head_dim
+                num_heads = 1
+            elif is_deepseek_mla and not use_mla_opt:
+                head_size = model_config.qk_nope_head_dim + model_config.qk_rope_head_dim
+            else:
+                head_size = getattr(model_config, "head_dim", int(hidden_size // num_attention_heads))
+            
+            # Process each sequence in this layer
+            for idx, slen in enumerate(seq_lens):
+                start_pos = sum(seq_lens[:idx])
+                end_pos = start_pos + slen
+                
+                if start_pos >= num_prefill_tokens:
+                    break
+                    
+                current_tokens = input_tokens_tensor[start_pos:end_pos]
+                current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
+                
+                # Extract this layer's KV cache
+                kv_cache = kv_caches[layer_idx]
+                
+                if is_deepseek_mla and use_mla_opt:
+                    key_cache = kv_cache.reshape(-1, num_heads, head_size)
+                    value_cache = kv_cache.reshape(-1, num_heads, head_size)
+                else:
+                    key_cache = kv_cache[0].reshape(-1, num_heads, head_size)
+                    value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
+                
+                layer_key = key_cache[current_slot_mapping].unsqueeze(0)
+                layer_value = value_cache[current_slot_mapping].unsqueeze(0)
+                
+                # Only send hidden states for final layer
+                if is_final_layer:
+                    current_hidden = hidden_states[start_pos:end_pos]
+                else:
+                    current_hidden = torch.empty(0, device=layer_key.device)
+                
+                # Send this layer immediately via the connector
+                if hasattr(kv_transfer_group, 'insert_layer'):
+                    kv_transfer_group.insert_layer(
+                        current_tokens,
+                        torch.ones_like(current_tokens, dtype=bool),
+                        layer_key,
+                        layer_value,
+                        current_hidden,
+                        layer_idx,
+                        len(kv_caches)
+                    )
+                else:
+                    logger.warning(f"KV transfer group doesn't support insert_layer method")
+                
+        except Exception as e:
+            # Don't break the forward pass if KV sending fails
+            logger.warning(f"Failed to send layer {layer_idx} KV cache: {e}")
 
 
 # NOTE: this is nn.Module so the profiler can properly capture/group

@@ -62,6 +62,39 @@ class KVTransferAgent:
             model_executable, model_input, kv_caches,
             hidden_or_intermediate_states)
 
+    def send_kv_caches_and_hidden_states_layerwise(
+        self,
+        model_executable: torch.nn.Module,
+        model_input: "ModelInputForGPUWithSamplingMetadata",
+        kv_caches: List[torch.Tensor],
+        hidden_or_intermediate_states: Union[torch.Tensor,
+                                             IntermediateTensors],
+    ) -> None:
+        """Send KV caches and hidden states layer-wise for compute-communication overlap"""
+        
+        # Check if connector supports layerwise transfer
+        if hasattr(self.connector, 'send_kv_caches_and_hidden_states_layerwise'):
+            self.connector.send_kv_caches_and_hidden_states_layerwise(
+                model_executable, model_input, kv_caches,
+                hidden_or_intermediate_states)
+        else:
+            # Fallback to regular method for connectors that don't support layerwise
+                         self.connector.send_kv_caches_and_hidden_states(
+                model_executable, model_input, kv_caches,
+                hidden_or_intermediate_states)
+
+    def insert_layer(self, input_tokens: torch.Tensor, roi: torch.Tensor,
+                    key: torch.Tensor, value: torch.Tensor,
+                    hidden: torch.Tensor, layer_id: int, total_layers: int) -> None:
+        """Insert single layer KV cache for immediate sending"""
+        
+        # Check if connector supports layerwise transfer
+        if hasattr(self.connector, 'insert_layer'):
+            self.connector.insert_layer(input_tokens, roi, key, value, hidden, layer_id, total_layers)
+        else:
+            # Fallback - accumulate and send via regular method (not ideal but works)
+            logger.warning("Connector doesn't support insert_layer, using fallback")
+
     def close(self) -> None:
         self.connector.close()
 
