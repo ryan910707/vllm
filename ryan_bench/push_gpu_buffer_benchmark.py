@@ -7,6 +7,7 @@ allowing prefill worker to exit after completing all requests.
 """
 import os
 import time
+import logging
 from multiprocessing import Event, Process
 
 import torch
@@ -14,13 +15,21 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 
+# Configure logging with timestamps
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
 
 prompts = [
-        "The cat sat on mat",
-        "Five dogs ran past me", 
-        "She walked through the door",
-        "He jumped over the fence",
-        "They danced in the rain",
+        "The cat sat on mat"*6000,
+        # "Five dogs ran past me", 
+        # "She walked through the door",
+        # "He jumped over the fence",
+        # "They danced in the rain",
     ]
 
 def run_prefill(prefill_done_event, decode_done_event):
@@ -50,9 +59,9 @@ def run_prefill(prefill_done_event, decode_done_event):
     torch.cuda.nvtx.range_push("prefill_model_init")
     llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
               kv_transfer_config=ktc,
-              max_model_len=2000,
+              max_model_len=None,
               dtype="half",
-              gpu_memory_utilization=0.8)
+              gpu_memory_utilization=0.9)
     torch.cuda.nvtx.range_pop()
 
     torch.cuda.nvtx.range_push("prefill_generation_loop")
@@ -62,19 +71,19 @@ def run_prefill(prefill_done_event, decode_done_event):
         torch.cuda.nvtx.range_pop()
     torch.cuda.nvtx.range_pop()
     
-    print("Prefill node is finished with all prompts.")
+    logger.info("Prefill node is finished with all prompts.")
     
     # Signal that prefill is done
     prefill_done_event.set()
     
     # Wait for decode to signal it's completely done
     torch.cuda.nvtx.range_push("prefill_wait_for_decode")
-    print("Prefill node waiting for decode to finish...")
+    logger.info("Prefill node waiting for decode to finish...")
     decode_done_event.wait()  # Wait for decode to signal completion
-    print("Decode signaled completion - prefill can exit now.")
+    logger.info("Decode signaled completion - prefill can exit now.")
     torch.cuda.nvtx.range_pop()
     
-    print("Prefill node exiting cleanly.")
+    logger.info("Prefill node exiting cleanly.")
     torch.cuda.nvtx.range_pop()
 
 
@@ -101,9 +110,9 @@ def run_decode(prefill_done_event, decode_done_event):
     torch.cuda.nvtx.range_push("decode_model_init")
     llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
               kv_transfer_config=ktc,
-              max_model_len=2000,
+              max_model_len=None,
               dtype= "half",
-              gpu_memory_utilization=0.8)
+              gpu_memory_utilization=0.9)
     torch.cuda.nvtx.range_pop()
 
     torch.cuda.nvtx.range_push("decode_generation_loop")
@@ -119,24 +128,24 @@ def run_decode(prefill_done_event, decode_done_event):
 
             all_outputs.extend(outputs)
     except Exception as e:
-        print(f"Error during decode generation: {e}")
+        logger.error(f"Error during decode generation: {e}")
         # Continue with whatever outputs we have
     
     torch.cuda.nvtx.range_pop()
 
     torch.cuda.nvtx.range_push("decode_output_processing")
-    print("\n--- Decode Node: Final Outputs ---")
+    logger.info("--- Decode Node: Final Outputs ---")
     for output in all_outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        logger.info(f"Prompt: {prompt[:50]}..., Generated text: {generated_text!r}")
     torch.cuda.nvtx.range_pop()
     
-    print("Decode node finished processing.")
+    logger.info("Decode node finished processing.")
     
     # Signal that decode is completely done
     decode_done_event.set()
-    print("Decode signaled completion to prefill.")
+    logger.info("Decode signaled completion to prefill.")
     
     torch.cuda.nvtx.range_pop()
 
@@ -155,19 +164,19 @@ if __name__ == "__main__":
 
     torch.cuda.nvtx.range_push("process_execution")
     # Start both processes
-    prefill_process.start()
     decode_process.start()
+    prefill_process.start()
 
     # Wait for prefill to exit first (it waits for decode to signal completion)
-    print("Waiting for prefill process to complete...")
+    logger.info("Waiting for prefill process to complete...")
     prefill_process.join()
-    print("Prefill process completed.")
+    logger.info("Prefill process completed.")
     
     # Then wait for decode process to finish
-    print("Waiting for decode process to complete...")
+    logger.info("Waiting for decode process to complete...")
     decode_process.join()
-    print("Decode process completed.")
+    logger.info("Decode process completed.")
     
     torch.cuda.nvtx.range_pop()
     
-    print("Benchmark completed successfully!")
+    logger.info("Benchmark completed successfully!")
