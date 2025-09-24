@@ -11,7 +11,6 @@
 """
 import threading
 from collections import deque
-import time
 import queue
 from typing import Deque, List, Optional, Union
 
@@ -28,15 +27,22 @@ logger = init_logger(__name__)
 class SimpleBuffer(KVLookupBufferBase):
 
     def __init__(self, signal_pipe: KVPipeBase, data_pipe: KVPipeBase,
-                 buffer_size_thresh: float):
+                 buffer_size_thresh: float, 
+                 vram_limit_gb: float = 0.0):
         """
         signal_pipe: on CPU
         data_pipe: on device (e.g. GPU)
+        buffer_size_thresh: threshold for total buffer size in bytes
+        vram_limit_gb: max GB of VRAM to use for storing KV caches
         
         In push mode:
         - Producer creates threads to push KV to consumer buffer
         - Consumer receives KV in background and stores locally
         - drop_select fetches from local buffer
+        
+        Dynamic storage strategy:
+        - Store tensors on GPU when VRAM usage < vram_limit_gb
+        - Store tensors on CPU when VRAM usage >= vram_limit_gb
         """
 
         self.buffer: Deque[List[torch.Tensor]] = deque()
@@ -57,6 +63,11 @@ class SimpleBuffer(KVLookupBufferBase):
 
         self.normal_signal = torch.tensor([0], device="cpu")
         self.end_signal = None
+        
+        # GPU VRAM management - simple GB limit
+        self.vram_limit_bytes = int(vram_limit_gb * 1024 * 1024 * 1024)
+        self.vram_used_by_buffer = 0  # Track VRAM used by our stored tensors
+        self._device_available = torch.cuda.is_available()
 
     def _matches(self, tokens_roi_sender: List[torch.Tensor],
                  tokens_roi_recver: List[torch.Tensor]):
@@ -79,6 +90,12 @@ class SimpleBuffer(KVLookupBufferBase):
         tokens_sender = tokens_sender[roi_sender]
         tokens_recver = tokens_recver[roi_recver]
 
+        # Handle device mismatches - move CPU tensor to GPU for comparison
+        if tokens_sender.device.type == "cpu" and tokens_recver.device.type == "cuda":
+            tokens_sender = tokens_sender.cuda()
+        elif tokens_sender.device.type == "cuda" and tokens_recver.device.type == "cpu":
+            tokens_recver = tokens_recver.cuda()
+
         # simple common prefix matching
         min_length = min(len(tokens_sender), len(tokens_recver))
 
@@ -99,23 +116,65 @@ class SimpleBuffer(KVLookupBufferBase):
 
         raise AssertionError(f"Unknown data type {type(data)}")
 
+    def _should_use_gpu_storage(self, data_size: int) -> bool:
+        """Determine if we should store tensors on GPU based on VRAM limit"""
+        if not self._device_available:
+            return False
+        
+        # Simple check: will adding this data exceed our VRAM limit?
+        projected_vram_usage = self.vram_used_by_buffer + data_size
+        
+        if projected_vram_usage > self.vram_limit_bytes:
+            current_gb = self.vram_used_by_buffer/1024/1024/1024
+            adding_gb = data_size/1024/1024/1024
+            limit_gb = self.vram_limit_bytes/1024/1024/1024
+            logger.debug(f"VRAM limit would be exceeded: "
+                        f"current={current_gb:.2f}GB, "
+                        f"adding={adding_gb:.2f}GB, "
+                        f"limit={limit_gb:.2f}GB. Using CPU storage.")
+            return False
+        
+        return True
+
+    def _get_tensor_device_size(self, tensor: torch.Tensor) -> int:
+        """Get the memory size of a tensor on its current device"""
+        if tensor is None:
+            return 0
+        return tensor.element_size() * tensor.numel()
+
     def _add_to_buffer(self, input_tokens: torch.Tensor, roi: torch.Tensor,
                        key: torch.Tensor, value: torch.Tensor,
                        hidden: torch.Tensor):
 
+        # Calculate total data size for storage planning
+        buffer_item_temp = [input_tokens, roi, key, value, hidden]
+        data_size = sum([self._get_element_size(data) for data in buffer_item_temp])
+        
+        # Determine optimal storage device based on VRAM usage
+        use_gpu_storage = self._should_use_gpu_storage(data_size)
+        target_device = "cuda" if use_gpu_storage else "cpu"
+        logger.info(f"Adding KV cache to buffer on {target_device}")
+        # Clone tensors to target device
         if isinstance(input_tokens, torch.Tensor):
-            input_tokens = input_tokens.clone()
+            input_tokens = input_tokens.clone().to(target_device)
         if isinstance(roi, torch.Tensor):
-            roi = roi.clone()
+            roi = roi.clone().to(target_device)
         if isinstance(key, torch.Tensor):
-            key = key.clone()
+            key = key.clone().to(target_device)
         if isinstance(value, torch.Tensor):
-            value = value.clone()
+            value = value.clone().to(target_device)
         if isinstance(hidden, torch.Tensor):   
-            hidden = hidden.clone()
+            hidden = hidden.clone().to(target_device)
 
         buffer_item = [input_tokens, roi, key, value, hidden]
-        data_size = sum([self._get_element_size(data) for data in buffer_item])
+        
+        # Track VRAM usage if storing on GPU
+        gpu_memory_used = 0
+        if use_gpu_storage:
+            gpu_memory_used = sum([self._get_tensor_device_size(tensor) 
+                                 for tensor in buffer_item if tensor is not None])
+
+        logger.info(f"GPU memory used: {gpu_memory_used/1024/1024/1024:.2f}GB")
 
         with self.buffer_cv:
             if self.buffer_size + data_size > self.buffer_size_threshold:
@@ -129,8 +188,16 @@ class SimpleBuffer(KVLookupBufferBase):
                 logger.debug(f"KV transfer buffer wait end")
 
             self.buffer_size += data_size
+            self.vram_used_by_buffer += gpu_memory_used
             self.buffer.append(buffer_item)
             self.buffer_cv.notify()
+            
+            vram_used_gb = self.vram_used_by_buffer/1024/1024/1024
+            vram_limit_gb = self.vram_limit_bytes/1024/1024/1024
+            logger.info(f"Stored KV cache on {target_device.upper()}: "
+                        f"data_size={data_size/1024/1024:.1f}MB, "
+                        f"vram_used={vram_used_gb:.2f}GB/"
+                        f"{vram_limit_gb:.1f}GB")
 
     def _is_end_signal(self, signal):
         return signal is None
@@ -212,16 +279,18 @@ class SimpleBuffer(KVLookupBufferBase):
                         logger.info("Received end signal in receive handler!")
                         break
                     
-                    # Receive the KV data
-                    input_tokens = self.data_pipe.recv_tensor().cpu()
-                    roi = self.data_pipe.recv_tensor().cpu()
+                    # Receive the KV data (initially to CPU, then _add_to_buffer 
+                    # will choose optimal device)
+                    input_tokens = self.data_pipe.recv_tensor()
+                    roi = self.data_pipe.recv_tensor()
                     if roi is not None:
                         roi = (roi > 0.5)  # Convert back to bool
-                    key = self.data_pipe.recv_tensor().cpu()
-                    value = self.data_pipe.recv_tensor().cpu()
-                    hidden = self.data_pipe.recv_tensor().cpu()
+                    key = self.data_pipe.recv_tensor()
+                    value = self.data_pipe.recv_tensor()
+                    hidden = self.data_pipe.recv_tensor()
                     
-                    # Add to local buffer
+                    # Add to local buffer using dynamic storage strategy
+                    # _add_to_buffer will automatically choose GPU vs CPU based on VRAM usage
                     self._add_to_buffer(input_tokens, roi, key, value, hidden)
                     logger.info("Received and buffered KV cache from producer")
                     
@@ -264,8 +333,8 @@ class SimpleBuffer(KVLookupBufferBase):
 
         # Query the local buffer for matching KV cache
         tokens_roi_recver = [
-            input_tokens.cpu() if input_tokens is not None else None,
-            roi.cpu() if roi is not None else None
+            input_tokens if input_tokens is not None else None,
+            roi if roi is not None else None
         ]
         
         def is_buffer_available(tokens_roi_recver: List[torch.Tensor]) -> bool:
@@ -286,17 +355,46 @@ class SimpleBuffer(KVLookupBufferBase):
             
             # Get matching item from local buffer
             matched_item = self.buffer.popleft()
-            # Move matched items to GPU
-            matched_item = [item.cuda() if item is not None else None for item in matched_item]
             
-            # Update buffer size
+            # Track VRAM usage before moving tensors
+            gpu_memory_to_free = 0
+            for tensor in matched_item:
+                if tensor is not None and tensor.device.type == "cuda":
+                    gpu_memory_to_free += self._get_tensor_device_size(tensor)
+            
+            # Move matched items to GPU if they're not already there
+            # This ensures consumer always gets tensors on GPU for processing
+            moved_item = []
+            for item in matched_item:
+                if item is not None:
+                    if item.device.type == "cpu":
+                        # Move from CPU to GPU for processing
+                        moved_item.append(item.cuda())
+                    else:
+                        # Already on GPU, just use as-is
+                        moved_item.append(item)
+                else:
+                    moved_item.append(None)
+            
+            # Update buffer size and VRAM tracking
+            data_size_freed = 0
             for tensor in matched_item:
                 if tensor is not None:
-                    self.buffer_size -= self._get_element_size(tensor)
+                    data_size_freed += self._get_element_size(tensor)
+            
+            self.buffer_size -= data_size_freed
+            self.vram_used_by_buffer -= gpu_memory_to_free
             self.buffer_cv.notify()
+            
+            vram_remaining_gb = self.vram_used_by_buffer/1024/1024/1024
+            vram_limit_gb = self.vram_limit_bytes/1024/1024/1024
+            logger.info(f"Retrieved KV cache: freed_size={data_size_freed/1024/1024:.1f}MB, "
+                        f"vram_freed={gpu_memory_to_free/1024/1024:.1f}MB, "
+                        f"vram_remaining={vram_remaining_gb:.2f}GB/"
+                        f"{vram_limit_gb:.1f}GB")
 
         torch.cuda.nvtx.range_pop()
-        return matched_item
+        return moved_item
 
     def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
                key: torch.Tensor, value: torch.Tensor,
@@ -365,6 +463,13 @@ class SimpleBuffer(KVLookupBufferBase):
                 self.push_worker_thread.join(timeout=5.0)
                 if self.push_worker_thread.is_alive():
                     logger.warning("Push worker thread did not shutdown cleanly")
+        
+        # Clear buffer and reset VRAM tracking
+        with self.buffer_cv:
+            self.buffer.clear()
+            self.buffer_size = 0
+            self.vram_used_by_buffer = 0
+            logger.debug("Cleared buffer and reset VRAM tracking")
             
         # If this is a producer, signal end to consumer
         # if not self.is_consumer:

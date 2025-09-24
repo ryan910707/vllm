@@ -25,11 +25,11 @@ logger = logging.getLogger(__name__)
 
 
 prompts = [
-        "The cat sat on mat"*6000,
-        # "Five dogs ran past me", 
-        # "She walked through the door",
-        # "He jumped over the fence",
-        # "They danced in the rain",
+        "The cat sat on mat",
+        "Five dogs ran past me", 
+        "She walked through the door",
+        "He jumped over the fence",
+        "They danced in the rain",
     ]
 
 def run_prefill(prefill_done_event, decode_done_event):
