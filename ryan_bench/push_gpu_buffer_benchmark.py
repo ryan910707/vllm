@@ -25,11 +25,11 @@ logger = logging.getLogger(__name__)
 
 
 prompts = [
-        "The cat sat on mat",
-        "Five dogs ran past me", 
-        "She walked through the door",
-        "He jumped over the fence",
-        "They danced in the rain",
+        "The cat sat on mat"*5000,
+        "Five dogs ran past me"*5000, 
+        "She walked through the door"*5000,
+        "He jumped over the fence"*5000,
+        "They danced in the rain"*5000,
     ]
 
 def run_prefill(prefill_done_event, decode_done_event):
@@ -123,6 +123,7 @@ def run_decode(prefill_done_event, decode_done_event):
             # At this point the kv-cache for this specific prompt should have been transferred
             # (pushed by the prefill node to our local buffer).
             torch.cuda.nvtx.range_push(f"decode {i}")
+            time.sleep(5)
             outputs = llm.generate([prompt_text], sampling_params) # Pass a list with a single prompt
             torch.cuda.nvtx.range_pop()
 

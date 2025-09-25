@@ -14,6 +14,8 @@ from collections import deque
 import queue
 from typing import Deque, List, Optional, Union
 
+from numpy import take_along_axis
+
 import torch
 
 from vllm.distributed.kv_transfer.kv_lookup_buffer.base import (
@@ -28,7 +30,7 @@ class SimpleBuffer(KVLookupBufferBase):
 
     def __init__(self, signal_pipe: KVPipeBase, data_pipe: KVPipeBase,
                  buffer_size_thresh: float, 
-                 vram_limit_gb: float = 0.0):
+                 vram_limit_gb: float = 1):
         """
         signal_pipe: on CPU
         data_pipe: on device (e.g. GPU)
@@ -153,7 +155,6 @@ class SimpleBuffer(KVLookupBufferBase):
         # Determine optimal storage device based on VRAM usage
         use_gpu_storage = self._should_use_gpu_storage(data_size)
         target_device = "cuda" if use_gpu_storage else "cpu"
-        logger.info(f"Adding KV cache to buffer on {target_device}")
         # Clone tensors to target device
         if isinstance(input_tokens, torch.Tensor):
             input_tokens = input_tokens.clone().to(target_device)
@@ -174,19 +175,8 @@ class SimpleBuffer(KVLookupBufferBase):
             gpu_memory_used = sum([self._get_tensor_device_size(tensor) 
                                  for tensor in buffer_item if tensor is not None])
 
-        logger.info(f"GPU memory used: {gpu_memory_used/1024/1024/1024:.2f}GB")
 
         with self.buffer_cv:
-            if self.buffer_size + data_size > self.buffer_size_threshold:
-                # log outside the while loop to avoid this message being logged
-                # repeatedly.
-                logger.debug("KV transfer buffer is full. Handling...")
-                torch.cuda.nvtx.range_push("KV transfer buffer wait")
-                while self.buffer_size + data_size > self.buffer_size_threshold:
-                    self.buffer_cv.wait()
-                torch.cuda.nvtx.range_pop()
-                logger.debug(f"KV transfer buffer wait end")
-
             self.buffer_size += data_size
             self.vram_used_by_buffer += gpu_memory_used
             self.buffer.append(buffer_item)
@@ -292,7 +282,6 @@ class SimpleBuffer(KVLookupBufferBase):
                     # Add to local buffer using dynamic storage strategy
                     # _add_to_buffer will automatically choose GPU vs CPU based on VRAM usage
                     self._add_to_buffer(input_tokens, roi, key, value, hidden)
-                    logger.info("Received and buffered KV cache from producer")
                     
                 except (RuntimeError, torch.distributed.DistNetworkError) as e:
                     if any(msg in str(e) for msg in ['Connection closed by peer', 'Connection reset by peer']):
@@ -355,16 +344,18 @@ class SimpleBuffer(KVLookupBufferBase):
             
             # Get matching item from local buffer
             matched_item = self.buffer.popleft()
-            
+            target_device = "cpu"
             # Track VRAM usage before moving tensors
             gpu_memory_to_free = 0
             for tensor in matched_item:
                 if tensor is not None and tensor.device.type == "cuda":
+                    target_device = "cuda"
                     gpu_memory_to_free += self._get_tensor_device_size(tensor)
             
             # Move matched items to GPU if they're not already there
             # This ensures consumer always gets tensors on GPU for processing
             moved_item = []
+            
             for item in matched_item:
                 if item is not None:
                     if item.device.type == "cpu":
@@ -388,7 +379,7 @@ class SimpleBuffer(KVLookupBufferBase):
             
             vram_remaining_gb = self.vram_used_by_buffer/1024/1024/1024
             vram_limit_gb = self.vram_limit_bytes/1024/1024/1024
-            logger.info(f"Retrieved KV cache: freed_size={data_size_freed/1024/1024:.1f}MB, "
+            logger.info(f"Retrieved KV cache from {target_device.upper()}: freed_size={data_size_freed/1024/1024:.1f}MB, "
                         f"vram_freed={gpu_memory_to_free/1024/1024:.1f}MB, "
                         f"vram_remaining={vram_remaining_gb:.2f}GB/"
                         f"{vram_limit_gb:.1f}GB")
