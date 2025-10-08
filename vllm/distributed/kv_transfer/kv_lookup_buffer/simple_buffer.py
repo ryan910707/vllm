@@ -232,12 +232,14 @@ class SimpleBuffer(KVLookupBufferBase):
             logger.info(f"Checking buffer status for data size: {data_size}")
             start_wait_time = time.time()
             
+            has_waited = False
             while not self._query_buffer_status(data_size):
                 # logger.info("Buffer full, waiting before retry...")
                 time.sleep(0.1)  # Wait before retrying
-            
+                has_waited = True
+
             wait_time = time.time() - start_wait_time
-            if wait_time > 0.1:  # Log if we waited more than 10ms
+            if has_waited:  # Log if we waited more than 10ms
                 logger.info(f" ----------- Waited {wait_time:.3f}s for buffer space")
             
             # Send signal to indicate incoming KV data
@@ -285,10 +287,10 @@ class SimpleBuffer(KVLookupBufferBase):
                         
                         # Send response
                         if has_space:
-                            logger.info(f"Buffer has space for {data_size} bytes")
+                            logger.debug(f"Buffer has space for {data_size} bytes")
                             self.signal_pipe.send_tensor(self.buffer_status_ok_signal)
                         else:
-                            logger.info(f"Buffer full: {self.buffer_size} + {data_size} > {self.buffer_size_threshold}")
+                            logger.debug(f"Buffer full: {self.buffer_size} + {data_size} > {self.buffer_size_threshold}")
                             self.signal_pipe.send_tensor(self.buffer_status_full_signal)
                         
                         continue  # Go back to waiting for next signal

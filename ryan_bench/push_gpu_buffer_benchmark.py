@@ -22,9 +22,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration - modify these values directly
-NUM_PROMPTS = 4
+NUM_PROMPTS = 10
 PROMPT_LENGTH = 32  # target character length
-BUFFER_SIZE = 31753*34
+BUFFER_SIZE = 8930*(128+5)
 
 # Simple word list for generating prompts
 WORDS = ["the", "cat", "dog", "tree", "house", "car", "sun", "moon", "water", 
@@ -119,7 +119,7 @@ def run_decode(prefill_done_event, decode_done_event):
     # We use GPU 1 for decode node.
     os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-    sampling_params = SamplingParams(temperature=0, top_p=0.95, min_tokens=512, max_tokens=513)
+    sampling_params = SamplingParams(temperature=0, top_p=0.95, min_tokens=6, max_tokens=7)
 
     # Using PyNcclConnector to transmit KV caches between vLLM instances.
     # This instance is the decode node (kv_consumer, rank 1).
