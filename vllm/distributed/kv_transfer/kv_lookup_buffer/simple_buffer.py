@@ -4,10 +4,10 @@
 
     Key Features:
     - Distributed KV cache transmission using PyNccl pipes.
-    - Push-based transfer: producer immediately sends KV to consumer's buffer
+    - Push-based transfer with buffer status checking: producer queries consumer's buffer status before sending
     - Non-blocking `insert`, non-blocking `drop_select`.
-    - Use CPU signal pipe to coordinate transfer completion
-    - Producer can exit after finishing all requests without waiting
+    - Use CPU signal pipe to coordinate transfer completion and buffer status queries
+    - Producer waits for sufficient buffer space before sending to prevent deadlocks
 """
 import threading
 from collections import deque
@@ -57,6 +57,11 @@ class SimpleBuffer(KVLookupBufferBase):
 
         self.normal_signal = torch.tensor([0], device="cpu")
         self.end_signal = None
+        
+        # Buffer status query signals
+        self.buffer_status_query_signal = torch.tensor([1], device="cpu")  # Producer queries buffer status
+        self.buffer_status_ok_signal = torch.tensor([2], device="cpu")     # Consumer responds: buffer has space
+        self.buffer_status_full_signal = torch.tensor([3], device="cpu")   # Consumer responds: buffer is full
 
     def _matches(self, tokens_roi_sender: List[torch.Tensor],
                  tokens_roi_recver: List[torch.Tensor]):
@@ -116,17 +121,20 @@ class SimpleBuffer(KVLookupBufferBase):
 
         buffer_item = [input_tokens, roi, key, value, hidden]
         data_size = sum([self._get_element_size(data) for data in buffer_item])
+        logger.info(f"Data size: {data_size}")
 
         with self.buffer_cv:
             if self.buffer_size + data_size > self.buffer_size_threshold:
                 # log outside the while loop to avoid this message being logged
                 # repeatedly.
                 logger.debug("KV transfer buffer is full. Handling...")
+                start_time = time.time()
                 torch.cuda.nvtx.range_push("KV transfer buffer wait")
                 while self.buffer_size + data_size > self.buffer_size_threshold:
                     self.buffer_cv.wait()
                 torch.cuda.nvtx.range_pop()
                 logger.debug(f"KV transfer buffer wait end")
+                logger.info(f"Buffer blocked time: {time.time() - start_time}")
 
             self.buffer_size += data_size
             self.buffer.append(buffer_item)
@@ -134,6 +142,41 @@ class SimpleBuffer(KVLookupBufferBase):
 
     def _is_end_signal(self, signal):
         return signal is None
+    
+    def _is_buffer_status_query(self, signal):
+        return signal is not None and torch.equal(signal, self.buffer_status_query_signal)
+    
+    def _is_buffer_status_response(self, signal):
+        return (signal is not None and 
+                (torch.equal(signal, self.buffer_status_ok_signal) or 
+                 torch.equal(signal, self.buffer_status_full_signal)))
+    
+    def _query_buffer_status(self, data_size: int) -> bool:
+        """
+        Producer queries consumer buffer status before sending.
+        Returns True if buffer has enough space, False otherwise.
+        """
+        logger.debug("Querying consumer buffer status...")
+        
+        # Send buffer status query signal
+        self.signal_pipe.send_tensor(self.buffer_status_query_signal)
+        
+        # Send data size so consumer can check if it fits
+        data_size_tensor = torch.tensor([data_size], device="cpu", dtype=torch.float32)
+        self.signal_pipe.send_tensor(data_size_tensor)
+        
+        # Wait for consumer response
+        response = self.signal_pipe.recv_tensor()
+        
+        if torch.equal(response, self.buffer_status_ok_signal):
+            logger.debug("Consumer buffer has space - proceeding with send")
+            return True
+        elif torch.equal(response, self.buffer_status_full_signal):
+            logger.debug("Consumer buffer is full - waiting")
+            return False
+        else:
+            logger.warning(f"Unexpected buffer status response: {response}")
+            return False
 
     def _start_push_worker(self):
         """Start the push worker thread to handle sequential KV sending"""
@@ -181,6 +224,22 @@ class SimpleBuffer(KVLookupBufferBase):
         try:
             torch.cuda.nvtx.range_push("send_kv_data_atomic")
             
+            # Calculate data size first
+            buffer_item = [input_tokens, roi, key, value, hidden]
+            data_size = sum([self._get_element_size(data) for data in buffer_item])
+            
+            # Query buffer status and wait until there's enough space
+            logger.info(f"Checking buffer status for data size: {data_size}")
+            start_wait_time = time.time()
+            
+            while not self._query_buffer_status(data_size):
+                # logger.info("Buffer full, waiting before retry...")
+                time.sleep(0.1)  # Wait before retrying
+            
+            wait_time = time.time() - start_wait_time
+            if wait_time > 0.1:  # Log if we waited more than 10ms
+                logger.info(f" ----------- Waited {wait_time:.3f}s for buffer space")
+            
             # Send signal to indicate incoming KV data
             self.signal_pipe.send_tensor(self.normal_signal)
             
@@ -192,7 +251,7 @@ class SimpleBuffer(KVLookupBufferBase):
             self.data_pipe.send_tensor(hidden)
             
             torch.cuda.nvtx.range_pop()
-            logger.debug("Successfully sent KV cache to consumer")
+            logger.info("---------------- Successfully sent KV cache to consumer")
             
         except Exception as e:
             logger.error(f"Error sending KV cache to consumer: {e}")
@@ -206,24 +265,48 @@ class SimpleBuffer(KVLookupBufferBase):
             
             while self.is_receiving:
                 try:
-                    # Wait for signal indicating incoming data
+                    # Wait for signal indicating incoming data or status query
                     signal = self.signal_pipe.recv_tensor()
                     if self._is_end_signal(signal):
                         logger.info("Received end signal in receive handler!")
                         break
                     
-                    # Receive the KV data
-                    input_tokens = self.data_pipe.recv_tensor()
-                    roi = self.data_pipe.recv_tensor()
-                    if roi is not None:
-                        roi = (roi > 0.5)  # Convert back to bool
-                    key = self.data_pipe.recv_tensor()
-                    value = self.data_pipe.recv_tensor()
-                    hidden = self.data_pipe.recv_tensor()
+                    # Handle buffer status query
+                    if self._is_buffer_status_query(signal):
+                        logger.debug("Received buffer status query")
+                        
+                        # Receive the data size being queried
+                        data_size_tensor = self.signal_pipe.recv_tensor()
+                        data_size = int(data_size_tensor.item())
+                        
+                        # Check if buffer has enough space
+                        with self.buffer_cv:
+                            has_space = (self.buffer_size + data_size <= self.buffer_size_threshold)
+                        
+                        # Send response
+                        if has_space:
+                            logger.info(f"Buffer has space for {data_size} bytes")
+                            self.signal_pipe.send_tensor(self.buffer_status_ok_signal)
+                        else:
+                            logger.info(f"Buffer full: {self.buffer_size} + {data_size} > {self.buffer_size_threshold}")
+                            self.signal_pipe.send_tensor(self.buffer_status_full_signal)
+                        
+                        continue  # Go back to waiting for next signal
                     
-                    # Add to local buffer
-                    self._add_to_buffer(input_tokens, roi, key, value, hidden)
-                    logger.info("Received and buffered KV cache from producer")
+                    # Handle normal KV data (existing logic)
+                    if torch.equal(signal, self.normal_signal):
+                        # Receive the KV data
+                        input_tokens = self.data_pipe.recv_tensor()
+                        roi = self.data_pipe.recv_tensor()
+                        if roi is not None:
+                            roi = (roi > 0.5)  # Convert back to bool
+                        key = self.data_pipe.recv_tensor()
+                        value = self.data_pipe.recv_tensor()
+                        hidden = self.data_pipe.recv_tensor()
+                        
+                        # Add to local buffer
+                        self._add_to_buffer(input_tokens, roi, key, value, hidden)
+                        logger.info("Received and buffered KV cache from producer")
                     
                 except (RuntimeError, torch.distributed.DistNetworkError) as e:
                     if any(msg in str(e) for msg in ['Connection closed by peer', 'Connection reset by peer']):
@@ -290,6 +373,7 @@ class SimpleBuffer(KVLookupBufferBase):
             self.buffer_cv.notify()
 
         torch.cuda.nvtx.range_pop()
+        logger.info("Drop-selected KV cache from buffer")
         return matched_item
 
     def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,

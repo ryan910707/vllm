@@ -7,10 +7,10 @@ benchmark() {
   model="Qwen/Qwen2.5-1.5B-Instruct"
   dataset_name="random"
   # dataset_path="./sonnet_4x.txt"
-  num_prompts=1
-  qps=1
-  input_len=10001
-  output_len=512
+  num_prompts=5
+  qps=5
+  input_len=5
+  output_len=300
   prefix_len=0
   tag="test"
 
