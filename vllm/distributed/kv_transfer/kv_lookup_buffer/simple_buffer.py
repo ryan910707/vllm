@@ -123,12 +123,13 @@ class SimpleBuffer(KVLookupBufferBase):
                 # log outside the while loop to avoid this message being logged
                 # repeatedly.
                 logger.debug("KV transfer buffer is full. Handling...")
-                # start_time = time.time()
+                start_time = time.time()
                 # torch.cuda.nvtx.range_push("KV transfer buffer wait")
                 while self.buffer_size + data_size > self.buffer_size_threshold:
                     self.buffer_cv.wait()
                 # torch.cuda.nvtx.range_pop()
-                # wait_time = time.time() - start_time
+                wait_time = time.time() - start_time
+                logger.info(f"----------- KV transfer buffer wait time: {wait_time}")
                 logger.debug(f"KV transfer buffer wait end")
 
             self.buffer_size += data_size
