@@ -878,6 +878,14 @@ class OpenAIServingChat(OpenAIServing):
                 completion_tokens=num_completion_tokens,
                 total_tokens=num_prompt_tokens + num_completion_tokens)
 
+            # Log completion
+            if self.request_logger is not None:
+                self.request_logger.log_completion(
+                    request_id,
+                    num_prompt_tokens,
+                    num_completion_tokens,
+                )
+
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error
             logger.exception("Error in chat completion stream generator.")
@@ -1085,6 +1093,14 @@ class OpenAIServingChat(OpenAIServing):
                 cached_tokens=final_res.num_cached_tokens)
 
         request_metadata.final_usage_info = usage
+
+        # Log completion
+        if self.request_logger is not None:
+            self.request_logger.log_completion(
+                request_id,
+                num_prompt_tokens,
+                num_generated_tokens,
+            )
 
         response = ChatCompletionResponse(
             id=request_id,
