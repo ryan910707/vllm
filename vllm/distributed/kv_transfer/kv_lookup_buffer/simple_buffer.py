@@ -194,6 +194,7 @@ class SimpleBuffer(KVLookupBufferBase):
             roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
         
         torch.cuda.nvtx.range_push("drop_select")
+        start_time = time.time()
 
         assert self.request_handling_thread is None, \
             "drop_select should be called by the KV cache consumer "\
@@ -219,6 +220,7 @@ class SimpleBuffer(KVLookupBufferBase):
         hidden = self.data_pipe.recv_tensor()
 
         torch.cuda.nvtx.range_pop()
+        logger.info(f"Drop_select KV cache time: {time.time() - start_time}")
 
         return [input_tokens, roi, key, value, hidden]
 
