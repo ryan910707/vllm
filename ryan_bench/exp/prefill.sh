@@ -6,8 +6,8 @@ NCCL_SOCKET_IFNAME=enp1s0f0 \
 python3 -m vllm.entrypoints.openai.api_server \
   --model Qwen/Qwen2.5-1.5B-Instruct \
   --port 8100 \
-  --gpu-memory-utilization 1.0 \
+  --gpu-memory-utilization 0.7 \
   --dtype "half" \
   --kv-transfer-config \
-  '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":1e9,"kv_ip":"10.121.187.102"}'
+  '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":500,"kv_ip":"10.121.187.102"}'
 

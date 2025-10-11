@@ -13,6 +13,7 @@ import threading
 from collections import deque
 import queue
 from typing import Deque, List, Optional, Union
+import time
 
 from numpy import take_along_axis
 
@@ -30,7 +31,7 @@ class SimpleBuffer(KVLookupBufferBase):
 
     def __init__(self, signal_pipe: KVPipeBase, data_pipe: KVPipeBase,
                  buffer_size_thresh: float, 
-                 vram_limit_gb: float = 1):
+                 vram_limit_gb: float = 0.1):
         """
         signal_pipe: on CPU
         data_pipe: on device (e.g. GPU)
@@ -315,6 +316,7 @@ class SimpleBuffer(KVLookupBufferBase):
             roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
         
         torch.cuda.nvtx.range_push("drop_select")
+        start_time = time.time()
         
         # Start consumer mode if not already started
         if not self.is_consumer:
@@ -383,7 +385,7 @@ class SimpleBuffer(KVLookupBufferBase):
                         f"vram_freed={gpu_memory_to_free/1024/1024:.1f}MB, "
                         f"vram_remaining={vram_remaining_gb:.2f}GB/"
                         f"{vram_limit_gb:.1f}GB")
-
+        logger.info(f"Drop_select KV cache time: {time.time() - start_time}")
         torch.cuda.nvtx.range_pop()
         return moved_item
 

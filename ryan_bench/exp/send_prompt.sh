@@ -9,13 +9,8 @@ benchmark() {
   # dataset_path="./sonnet_4x.txt"
   num_prompts=5
   qps=1
-<<<<<<< HEAD
-  input_len=10001
-  output_len=512
-=======
-  input_len=30
-  output_len=2000
->>>>>>> 0430f447e (feat: sequential drop select)
+  input_len=25000
+  output_len=30
   prefix_len=0
   tag="test"
 
