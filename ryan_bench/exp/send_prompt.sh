@@ -10,7 +10,7 @@ benchmark() {
   num_prompts=5
   qps=1
   input_len=25000
-  output_len=30
+  output_len=3000
   prefix_len=0
   tag="test"
 
