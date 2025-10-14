@@ -31,12 +31,17 @@ class SimpleBuffer(KVLookupBufferBase):
 
     def __init__(self, signal_pipe: KVPipeBase, data_pipe: KVPipeBase,
                  buffer_size_thresh: float, 
-                 vram_limit_gb: float = 0.1):
+                 vram_limit_gb: float = 10,
+                 role: Optional[str] = None):
         """
         signal_pipe: on CPU
         data_pipe: on device (e.g. GPU)
         buffer_size_thresh: threshold for total buffer size in bytes
         vram_limit_gb: max GB of VRAM to use for storing KV caches
+        role: 'producer', 'consumer', or None (backward compatible)
+            - 'producer': only start push worker at init (for sending KV)
+            - 'consumer': only start receiver handler at init (for receiving KV)
+            - None: lazy start on first use (backward compatible)
         
         In push mode:
         - Producer creates threads to push KV to consumer buffer
@@ -71,6 +76,21 @@ class SimpleBuffer(KVLookupBufferBase):
         self.vram_limit_bytes = int(vram_limit_gb * 1024 * 1024 * 1024)
         self.vram_used_by_buffer = 0  # Track VRAM used by our stored tensors
         self._device_available = torch.cuda.is_available()
+        
+        # Start threads at initialization to avoid cold start based on role
+        if role == 'consumer':
+            # Consumer only needs receiver handler
+            self.start_consumer_mode()
+            logger.info("Started SimpleBuffer in consumer mode (receiver handler ready)")
+        elif role == 'producer':
+            # Producer only needs push worker
+            self._start_push_worker()
+            logger.info("Started SimpleBuffer in producer mode (push worker ready)")
+        elif role is None:
+            # Backward compatible: lazy start on first use
+            logger.debug("SimpleBuffer initialized with lazy thread startup")
+        else:
+            raise ValueError(f"Invalid role: {role}. Must be 'producer', 'consumer', or None")
 
     def _matches(self, tokens_roi_sender: List[torch.Tensor],
                  tokens_roi_recver: List[torch.Tensor]):
@@ -149,33 +169,25 @@ class SimpleBuffer(KVLookupBufferBase):
                        key: torch.Tensor, value: torch.Tensor,
                        hidden: torch.Tensor):
 
-        # Calculate total data size for storage planning
+        # Calculate total data size for storage planning (single pass)
         buffer_item_temp = [input_tokens, roi, key, value, hidden]
         data_size = sum([self._get_element_size(data) for data in buffer_item_temp])
         
         # Determine optimal storage device based on VRAM usage
         use_gpu_storage = self._should_use_gpu_storage(data_size)
         target_device = "cuda" if use_gpu_storage else "cpu"
-        # Clone tensors to target device
-        if isinstance(input_tokens, torch.Tensor):
-            input_tokens = input_tokens.clone().to(target_device)
-        if isinstance(roi, torch.Tensor):
-            roi = roi.clone().to(target_device)
-        if isinstance(key, torch.Tensor):
-            key = key.clone().to(target_device)
-        if isinstance(value, torch.Tensor):
-            value = value.clone().to(target_device)
-        if isinstance(hidden, torch.Tensor):   
-            hidden = hidden.clone().to(target_device)
-
-        buffer_item = [input_tokens, roi, key, value, hidden]
         
-        # Track VRAM usage if storing on GPU
-        gpu_memory_used = 0
-        if use_gpu_storage:
-            gpu_memory_used = sum([self._get_tensor_device_size(tensor) 
-                                 for tensor in buffer_item if tensor is not None])
-
+        # Clone tensors to target device (optimized: single loop)
+        buffer_item = []
+        for tensor in buffer_item_temp:
+            if isinstance(tensor, torch.Tensor):
+                buffer_item.append(tensor.clone().to(target_device))
+            else:
+                buffer_item.append(tensor)
+        
+        # GPU memory used equals data_size if using GPU storage
+        # (avoid redundant size calculation)
+        gpu_memory_used = data_size if use_gpu_storage else 0
 
         with self.buffer_cv:
             self.buffer_size += data_size
@@ -329,12 +341,21 @@ class SimpleBuffer(KVLookupBufferBase):
         ]
         
         def is_buffer_available(tokens_roi_recver: List[torch.Tensor]) -> bool:
-            # perform input tokens and roi matching
-            for _ in range(len(self.buffer)):
+            # Early exit if buffer is empty
+            if not self.buffer:
+                return False
+            
+            # Fast path: check first element without rotation (common case)
+            if self._matches(self.buffer[0], tokens_roi_recver) > 0:
+                return True
+            
+            # Slow path: search remaining elements with rotation
+            buffer_len = len(self.buffer)
+            for _ in range(1, buffer_len):
+                self.buffer.rotate(-1)
                 if self._matches(self.buffer[0], tokens_roi_recver) > 0:
                     return True
-                # rotate the element we just accessed to the end
-                self.buffer.rotate(-1)
+            
             return False
 
         with self.buffer_cv:
@@ -361,8 +382,8 @@ class SimpleBuffer(KVLookupBufferBase):
             for item in matched_item:
                 if item is not None:
                     if item.device.type == "cpu":
-                        # Move from CPU to GPU for processing
-                        moved_item.append(item.cuda())
+                        # Move from CPU to GPU for processing (non-blocking for better perf)
+                        moved_item.append(item.cuda(non_blocking=True))
                     else:
                         # Already on GPU, just use as-is
                         moved_item.append(item)

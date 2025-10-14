@@ -114,7 +114,8 @@ class SimpleConnector(KVConnectorBase):
             if self.config.kv_buffer_device == "cuda":
                 self.producer_buffer = SimpleBuffer(self.producer_signal_pipe,
                                                     self.producer_data_pipe,
-                                                    self.config.kv_buffer_size)
+                                                    self.config.kv_buffer_size,
+                                                    role='producer')
             elif self.config.kv_buffer_device == "cpu":
                 self.producer_buffer = CpuBuffer(self.producer_signal_pipe,
                                                 self.producer_data_pipe,
@@ -149,6 +150,7 @@ class SimpleConnector(KVConnectorBase):
                     self.consumer_signal_pipe,
                     self.consumer_data_pipe,
                     self.config.kv_buffer_size,
+                    role='consumer',
                 )
             elif self.config.kv_buffer_device == "cpu":
                 self.consumer_buffer = CpuBuffer(

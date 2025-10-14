@@ -61,7 +61,7 @@ def run_prefill(prefill_done_event, decode_done_event):
               kv_transfer_config=ktc,
               max_model_len=None,
               dtype="half",
-              gpu_memory_utilization=0.9)
+              gpu_memory_utilization=0.6)
     torch.cuda.nvtx.range_pop()
 
     torch.cuda.nvtx.range_push("prefill_generation_loop")
@@ -112,7 +112,7 @@ def run_decode(prefill_done_event, decode_done_event):
               kv_transfer_config=ktc,
               max_model_len=None,
               dtype= "half",
-              gpu_memory_utilization=0.9)
+              gpu_memory_utilization=0.6)
     torch.cuda.nvtx.range_pop()
 
     torch.cuda.nvtx.range_push("decode_generation_loop")
