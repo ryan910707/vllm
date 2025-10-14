@@ -1069,6 +1069,20 @@ class Scheduler:
                 num_lookahead_slots=self._get_num_lookahead_slots(
                     is_prefill=True, enable_chunking=enable_chunking),
             )
+        
+        # Sequential scheduling: don't schedule new prefills if there
+        # are running requests (ensures sequential processing)
+        if len(self.running) > 0:
+            logger.debug(
+                "Sequential scheduling: skipping prefills "
+                "(%d running requests)", len(self.running))
+            return SchedulerPrefillOutputs(
+                seq_groups=[],
+                ignored_seq_groups=[],
+                num_lookahead_slots=self._get_num_lookahead_slots(
+                    is_prefill=True, enable_chunking=enable_chunking),
+            )
+        
         ignored_seq_groups: List[SequenceGroup] = []
         seq_groups: List[ScheduledSequenceGroup] = []
 
@@ -1077,6 +1091,14 @@ class Scheduler:
         leftover_waiting_sequences: Deque[SequenceGroup] = deque()
         while self._passed_delay(time.time()) and waiting_queue:
             seq_group = waiting_queue[0]
+            
+            # Limit to ONE prefill per scheduling cycle
+            if len(seq_groups) > 0:
+                logger.debug(
+                    "Sequential scheduling: limiting to one prefill "
+                    "per cycle (%d scheduled, %d waiting)",
+                    len(seq_groups), len(waiting_queue))
+                break
 
             waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
             assert len(waiting_seqs) == 1, (

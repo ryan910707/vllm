@@ -231,6 +231,21 @@ class OpenAIServingCompletion(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
+        # Log completion for each sub-request
+        if self.request_logger is not None:
+            for i in range(num_prompts):
+                request_id_item = f"{request_id}-{i}"
+                final_res = final_res_batch_checked[i]
+                prompt_tokens = (len(final_res.prompt_token_ids)
+                                 if final_res.prompt_token_ids else 0)
+                completion_tokens = sum(
+                    len(output.token_ids) for output in final_res.outputs)
+                self.request_logger.log_completion(
+                    request_id_item,
+                    prompt_tokens,
+                    completion_tokens,
+                )
+
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.
         if request.stream:
@@ -384,6 +399,14 @@ class OpenAIServingCompletion(OpenAIServing):
 
             # report to FastAPI middleware aggregate usage across all choices
             request_metadata.final_usage_info = final_usage_info
+
+            # Log completion
+            if self.request_logger is not None:
+                self.request_logger.log_completion(
+                    request_id,
+                    total_prompt_tokens,
+                    total_completion_tokens,
+                )
 
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error
