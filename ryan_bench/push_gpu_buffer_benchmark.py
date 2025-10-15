@@ -8,15 +8,16 @@ allowing prefill worker to exit after completing all requests.
 import os
 import logging
 import random
+import time
 from multiprocessing import Event, Process
 
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 
-# Configure logging with timestamps
+# Configure logging with timestamps including milliseconds
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s.%(msecs)03d - %(name)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
@@ -24,7 +25,9 @@ logger = logging.getLogger(__name__)
 # Configuration - modify these values directly
 NUM_PROMPTS = 10
 PROMPT_LENGTH = 128  # target character length
-BUFFER_SIZE = 8930*(128+5)
+OUTPUT_LEN = 128
+BUFFER_SIZE = 8930*(256+5)
+QPS = 6.0  # Queries per second (0 = no rate limiting, send as fast as possible)
 
 # Simple word list for generating prompts
 WORDS = ["the", "cat", "dog", "tree", "house", "car", "sun", "moon", "water", 
@@ -94,11 +97,29 @@ def run_prefill(prefill_done_event, decode_done_event):
     logger.info("Prefill model initialized")
 
     logger.info("Starting prefill generation loop")
+    start_time = time.time()
+    
     for i, prompt_text in enumerate(prompts):
+        # Calculate when this request should be sent based on QPS
+        if QPS > 0:
+            target_time = start_time + (i / QPS)
+            current_time = time.time()
+            sleep_time = target_time - current_time
+            
+            if sleep_time > 0:
+                logger.info(f"Rate limiting: sleeping {sleep_time:.3f}s to maintain {QPS} QPS")
+                time.sleep(sleep_time)
+        
+        request_start = time.time()
         logger.info(f"Processing prefill prompt {i}")
         llm.generate([prompt_text], sampling_params) # Pass a list with a single prompt
-        logger.info(f"Completed prefill prompt {i}")
-    logger.info("Prefill generation loop completed")
+        request_duration = time.time() - request_start
+        logger.info(f"Completed prefill prompt {i} in {request_duration:.3f}s")
+    
+    total_duration = time.time() - start_time
+    actual_qps = NUM_PROMPTS / total_duration if total_duration > 0 else 0
+    logger.info(f"Prefill generation loop completed in {total_duration:.2f}s")
+    logger.info(f"Prefill actual QPS: {actual_qps:.2f} (target: {QPS if QPS > 0 else 'unlimited'})")
     
     logger.info("Prefill node is finished with all prompts")
     
@@ -119,7 +140,7 @@ def run_decode(prefill_done_event, decode_done_event):
     # We use GPU 1 for decode node.
     os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-    sampling_params = SamplingParams(temperature=0, top_p=0.95, min_tokens=128, max_tokens=129)
+    sampling_params = SamplingParams(temperature=0, top_p=0.95, min_tokens=OUTPUT_LEN, max_tokens=OUTPUT_LEN+1)
 
     # Using PyNcclConnector to transmit KV caches between vLLM instances.
     # This instance is the decode node (kv_consumer, rank 1).
@@ -143,21 +164,45 @@ def run_decode(prefill_done_event, decode_done_event):
 
     logger.info("Starting decode generation loop")
     all_outputs = []
+    start_time = time.time()
+    latencies = []
     
     try:
         for i, prompt_text in enumerate(prompts):
+            # Calculate when this request should be sent based on QPS
+            if QPS > 0:
+                target_time = start_time + (i / QPS)
+                current_time = time.time()
+                sleep_time = target_time - current_time
+                
+                if sleep_time > 0:
+                    logger.info(f"Rate limiting: sleeping {sleep_time:.3f}s to maintain {QPS} QPS")
+                    time.sleep(sleep_time)
+            
             # At this point the kv-cache for this specific prompt should have been transferred
             # (pushed by the prefill node to our local buffer).
+            request_start = time.time()
             logger.info(f"Processing decode prompt {i}")
             outputs = llm.generate([prompt_text], sampling_params) # Pass a list with a single prompt
-            logger.info(f"Completed decode prompt {i}")
+            request_duration = time.time() - request_start
+            latencies.append(request_duration)
+            logger.info(f"Completed decode prompt {i} in {request_duration:.3f}s")
 
             all_outputs.extend(outputs)
     except Exception as e:
         logger.error(f"Error during decode generation: {e}")
         # Continue with whatever outputs we have
     
+    total_duration = time.time() - start_time
+    actual_qps = NUM_PROMPTS / total_duration if total_duration > 0 else 0
+    avg_latency = sum(latencies) / len(latencies) if latencies else 0
+    min_latency = min(latencies) if latencies else 0
+    max_latency = max(latencies) if latencies else 0
+    
     logger.info("Decode generation loop completed")
+    logger.info(f"Decode total time: {total_duration:.2f}s")
+    logger.info(f"Decode actual QPS: {actual_qps:.2f} (target: {QPS if QPS > 0 else 'unlimited'})")
+    logger.info(f"Decode latency - avg: {avg_latency:.3f}s, min: {min_latency:.3f}s, max: {max_latency:.3f}s")
 
     logger.info("--- Decode Node: Final Outputs ---")
     for output in all_outputs:
@@ -175,6 +220,8 @@ def run_decode(prefill_done_event, decode_done_event):
 if __name__ == "__main__":
     logger.info("=== Push GPU Buffer Benchmark ===")
     logger.info(f"Config: {NUM_PROMPTS} prompts, length {PROMPT_LENGTH} chars")
+    logger.info(f"Target QPS: {QPS if QPS > 0 else 'unlimited (no rate limiting)'}")
+    logger.info(f"Buffer size: {BUFFER_SIZE}")
     logger.info("Generated prompts:")
     for i, prompt in enumerate(prompts):
         logger.info(f"  {i+1}: {prompt[:50]}... (len: {len(prompt)})")
