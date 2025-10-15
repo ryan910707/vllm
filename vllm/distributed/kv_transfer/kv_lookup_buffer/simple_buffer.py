@@ -122,7 +122,7 @@ class SimpleBuffer(KVLookupBufferBase):
             if self.buffer_size + data_size > self.buffer_size_threshold:
                 # log outside the while loop to avoid this message being logged
                 # repeatedly.
-                logger.debug("KV transfer buffer is full. Handling...")
+                logger.info("KV transfer buffer is full. Handling...")
                 start_time = time.time()
                 # torch.cuda.nvtx.range_push("KV transfer buffer wait")
                 while self.buffer_size + data_size > self.buffer_size_threshold:
@@ -130,7 +130,7 @@ class SimpleBuffer(KVLookupBufferBase):
                 # torch.cuda.nvtx.range_pop()
                 wait_time = time.time() - start_time
                 logger.info(f"----------- KV transfer buffer wait time: {wait_time}")
-                logger.debug(f"KV transfer buffer wait end")
+                logger.info(f"KV transfer buffer wait end")
 
             self.buffer_size += data_size
             self.buffer.append(buffer_item)
@@ -196,6 +196,7 @@ class SimpleBuffer(KVLookupBufferBase):
         assert self.request_handling_thread is None, \
             "drop_select should be called by the KV cache consumer "\
             "(e.g. the decode vLLM instance)"
+        start_time = time.time()
 
         if isinstance(input_tokens, torch.Tensor):
             input_tokens = input_tokens.clone()
@@ -215,7 +216,8 @@ class SimpleBuffer(KVLookupBufferBase):
         key = self.data_pipe.recv_tensor()
         value = self.data_pipe.recv_tensor()
         hidden = self.data_pipe.recv_tensor()
-
+        end_time = time.time()
+        logger.info(f"drop_select time: {end_time - start_time}")
         return [input_tokens, roi, key, value, hidden]
 
     def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,

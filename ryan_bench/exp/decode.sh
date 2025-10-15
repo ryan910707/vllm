@@ -10,7 +10,7 @@ python3 -m vllm.entrypoints.openai.api_server \
   --gpu-memory-utilization 0.7 \
   --dtype "half" \
   --kv-transfer-config \
-  '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2,"kv_buffer_size":1e9,"kv_ip":"10.121.187.102"}'
+  '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2,"kv_buffer_size":2e9,"kv_ip":"10.121.187.102"}'
   
 
 # sample request
