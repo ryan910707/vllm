@@ -5,14 +5,13 @@
     Key Features:
     - Distributed KV cache transmission using PyNccl pipes.
     - Push-based transfer with buffer status checking: producer queries consumer's buffer status before sending
-    - Non-blocking `insert`, non-blocking `drop_select`.
+    - Blocking `insert` (process blocks until KV data is sent), non-blocking `drop_select`.
     - Use CPU signal pipe to coordinate transfer completion and buffer status queries
     - Producer waits for sufficient buffer space before sending to prevent deadlocks
 """
 import threading
 from collections import deque
 import time
-import queue
 from typing import Deque, List, Optional, Union
 
 import torch
@@ -34,7 +33,7 @@ class SimpleBuffer(KVLookupBufferBase):
         data_pipe: on device (e.g. GPU)
         
         In push mode:
-        - Producer creates threads to push KV to consumer buffer
+        - Producer blocks on insert() until KV is sent to consumer buffer
         - Consumer receives KV in background and stores locally
         - drop_select fetches from local buffer
         """
@@ -49,11 +48,6 @@ class SimpleBuffer(KVLookupBufferBase):
         self.receive_thread: Optional[threading.Thread] = None
         self.is_consumer = False
         self.is_receiving = False
-
-        # Queue-based push mechanism to prevent race conditions
-        self.push_queue: queue.Queue = queue.Queue()
-        self.push_worker_thread: Optional[threading.Thread] = None
-        self.push_worker_running = False
 
         self.normal_signal = torch.tensor([0], device="cpu")
         self.end_signal = None
@@ -177,45 +171,6 @@ class SimpleBuffer(KVLookupBufferBase):
         else:
             logger.warning(f"Unexpected buffer status response: {response}")
             return False
-
-    def _start_push_worker(self):
-        """Start the push worker thread to handle sequential KV sending"""
-        if self.push_worker_thread is not None and self.push_worker_thread.is_alive():
-            return  # Worker already running
-            
-        self.push_worker_running = True
-        
-        def push_worker():
-            """Worker thread that processes the push queue sequentially"""
-            logger.debug("Push worker thread started")
-            
-            while self.push_worker_running:
-                try:
-                    # Wait for KV data to send (with timeout to check shutdown)
-                    kv_data = self.push_queue.get(timeout=1.0)
-                    
-                    if kv_data is None:  # Shutdown signal
-                        break
-                        
-                    # Send KV data atomically
-                    input_tokens, roi, key, value, hidden = kv_data
-                    self._send_kv_data_atomic(input_tokens, roi, key, value, hidden)
-                    
-                    # Mark task as done
-                    self.push_queue.task_done()
-                    
-                except queue.Empty:
-                    # Timeout occurred, continue to check shutdown
-                    continue
-                except Exception as e:
-                    logger.error(f"Error in push worker: {e}")
-                    # Continue processing other items
-                    continue
-            
-            logger.debug("Push worker thread finished")
-        
-        self.push_worker_thread = threading.Thread(target=push_worker, daemon=True)
-        self.push_worker_thread.start()
 
     def _send_kv_data_atomic(self, input_tokens: torch.Tensor, roi: torch.Tensor,
                             key: torch.Tensor, value: torch.Tensor, 
@@ -382,13 +337,10 @@ class SimpleBuffer(KVLookupBufferBase):
                key: torch.Tensor, value: torch.Tensor,
                hidden: torch.Tensor) -> None:
         """
-        Producer-side insert: queue KV for sequential sending to prevent race conditions
+        Producer-side insert: blocking send of KV data to consumer
+        This will block the calling process until the KV data is sent
         """
-        torch.cuda.nvtx.range_push("insert_queue_mode")
-        
-        # Start push worker if not already running
-        if not self.push_worker_running:
-            self._start_push_worker()
+        torch.cuda.nvtx.range_push("insert_blocking_mode")
         
         # Clone tensors to ensure they remain valid when sent
         if isinstance(input_tokens, torch.Tensor):
@@ -402,21 +354,16 @@ class SimpleBuffer(KVLookupBufferBase):
         if isinstance(hidden, torch.Tensor):
             hidden = hidden.clone()
         
-        # Queue the KV data for sequential sending by push worker
-        kv_data = (input_tokens, roi, key, value, hidden)
-        self.push_queue.put(kv_data)
+        # Directly send KV data (blocking)
+        self._send_kv_data_atomic(input_tokens, roi, key, value, hidden)
         
         torch.cuda.nvtx.range_pop()
-        logger.debug("KV cache queued for sending")
+        logger.debug("KV cache sent successfully")
 
     def signal_end(self):
         """Signal that no more KV caches will be sent"""
         try:
-            # Wait for all queued items to be processed
-            if self.push_worker_running:
-                logger.debug("Waiting for push queue to empty...")
-                self.push_queue.join()  # Wait for all items to be processed
-                
+            # Since insert is now blocking, all KV data has already been sent
             self.signal_pipe.send_tensor(self.end_signal)
             logger.debug("Sent end signal to consumer")
         except Exception as e:
@@ -432,20 +379,3 @@ class SimpleBuffer(KVLookupBufferBase):
         if hasattr(self, "receive_thread") and self.receive_thread is not None:
             logger.info("Closing receive thread")
             self.receive_thread.join()
-        
-        # Stop producer push worker thread
-        if self.push_worker_running:
-            self.push_worker_running = False
-            
-            # Send shutdown signal to push worker
-            # self.push_queue.put(None)
-            
-            if hasattr(self, "push_worker_thread") and self.push_worker_thread is not None:
-                logger.info("Closing push worker thread")
-                self.push_worker_thread.join(timeout=5.0)
-                if self.push_worker_thread.is_alive():
-                    logger.warning("Push worker thread did not shutdown cleanly")
-            
-        # If this is a producer, signal end to consumer
-        # if not self.is_consumer:
-        #     self.signal_end()
