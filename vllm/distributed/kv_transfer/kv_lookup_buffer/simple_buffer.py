@@ -31,7 +31,7 @@ class SimpleBuffer(KVLookupBufferBase):
 
     def __init__(self, signal_pipe: KVPipeBase, data_pipe: KVPipeBase,
                  buffer_size_thresh: float, 
-                 vram_limit_gb: float = 8930*(128+5)/1024/1024/1024,
+                 vram_limit_gb: float = 2,
                  role: Optional[str] = None):
         """
         signal_pipe: on CPU
@@ -195,12 +195,12 @@ class SimpleBuffer(KVLookupBufferBase):
             self.buffer.append(buffer_item)
             self.buffer_cv.notify()
             
-            # vram_used_gb = self.vram_used_by_buffer/1024/1024/1024
-            # vram_limit_gb = self.vram_limit_bytes/1024/1024/1024
-            # logger.debug(f"Stored KV cache on {target_device.upper()}: "
-            #             f"data_size={data_size/1024/1024:.1f}MB, "
-            #             f"vram_used={vram_used_gb:.2f}GB/"
-            #             f"{vram_limit_gb:.1f}GB")
+            vram_used_gb = self.vram_used_by_buffer/1024/1024/1024
+            vram_limit_gb = self.vram_limit_bytes/1024/1024/1024
+            logger.info(f"Stored KV cache on {target_device.upper()}: "
+                        f"data_size={data_size/1024/1024:.1f}MB, "
+                        f"vram_used={vram_used_gb:.2f}GB/"
+                        f"{vram_limit_gb:.1f}GB")
 
     def _is_end_signal(self, signal):
         return signal is None

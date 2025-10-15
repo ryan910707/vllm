@@ -27,7 +27,7 @@ NUM_PROMPTS = 10
 PROMPT_LENGTH = 128  # target character length
 OUTPUT_LEN = 128
 BUFFER_SIZE = 8930*(256+5)
-QPS = 6.0  # Queries per second (0 = no rate limiting, send as fast as possible)
+QPS = 2.0  # Queries per second (0 = no rate limiting, send as fast as possible)
 
 # Simple word list for generating prompts
 WORDS = ["the", "cat", "dog", "tree", "house", "car", "sun", "moon", "water", 
