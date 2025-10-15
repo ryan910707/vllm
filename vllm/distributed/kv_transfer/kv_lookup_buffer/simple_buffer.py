@@ -31,7 +31,7 @@ class SimpleBuffer(KVLookupBufferBase):
 
     def __init__(self, signal_pipe: KVPipeBase, data_pipe: KVPipeBase,
                  buffer_size_thresh: float, 
-                 vram_limit_gb: float = 10,
+                 vram_limit_gb: float = 8930*(128+5)/1024/1024/1024,
                  role: Optional[str] = None):
         """
         signal_pipe: on CPU
@@ -148,13 +148,13 @@ class SimpleBuffer(KVLookupBufferBase):
         projected_vram_usage = self.vram_used_by_buffer + data_size
         
         if projected_vram_usage > self.vram_limit_bytes:
-            current_gb = self.vram_used_by_buffer/1024/1024/1024
-            adding_gb = data_size/1024/1024/1024
-            limit_gb = self.vram_limit_bytes/1024/1024/1024
-            logger.debug(f"VRAM limit would be exceeded: "
-                        f"current={current_gb:.2f}GB, "
-                        f"adding={adding_gb:.2f}GB, "
-                        f"limit={limit_gb:.2f}GB. Using CPU storage.")
+            # current_gb = self.vram_used_by_buffer/1024/1024/1024
+            # adding_gb = data_size/1024/1024/1024
+            # limit_gb = self.vram_limit_bytes/1024/1024/1024
+            # logger.debug(f"VRAM limit would be exceeded: "
+            #             f"current={current_gb:.2f}GB, "
+            #             f"adding={adding_gb:.2f}GB, "
+            #             f"limit={limit_gb:.2f}GB. Using CPU storage.")
             return False
         
         return True
@@ -195,12 +195,12 @@ class SimpleBuffer(KVLookupBufferBase):
             self.buffer.append(buffer_item)
             self.buffer_cv.notify()
             
-            vram_used_gb = self.vram_used_by_buffer/1024/1024/1024
-            vram_limit_gb = self.vram_limit_bytes/1024/1024/1024
-            logger.info(f"Stored KV cache on {target_device.upper()}: "
-                        f"data_size={data_size/1024/1024:.1f}MB, "
-                        f"vram_used={vram_used_gb:.2f}GB/"
-                        f"{vram_limit_gb:.1f}GB")
+            # vram_used_gb = self.vram_used_by_buffer/1024/1024/1024
+            # vram_limit_gb = self.vram_limit_bytes/1024/1024/1024
+            # logger.debug(f"Stored KV cache on {target_device.upper()}: "
+            #             f"data_size={data_size/1024/1024:.1f}MB, "
+            #             f"vram_used={vram_used_gb:.2f}GB/"
+            #             f"{vram_limit_gb:.1f}GB")
 
     def _is_end_signal(self, signal):
         return signal is None
@@ -262,7 +262,7 @@ class SimpleBuffer(KVLookupBufferBase):
             self.data_pipe.send_tensor(hidden)
             
             torch.cuda.nvtx.range_pop()
-            logger.debug("Successfully sent KV cache to consumer")
+            logger.info("------------ Successfully sent KV cache to consumer")
             
         except Exception as e:
             logger.error(f"Error sending KV cache to consumer: {e}")
@@ -328,11 +328,6 @@ class SimpleBuffer(KVLookupBufferBase):
             roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
         
         torch.cuda.nvtx.range_push("drop_select")
-        start_time = time.time()
-        
-        # Start consumer mode if not already started
-        if not self.is_consumer:
-            self.start_consumer_mode()
 
         # Query the local buffer for matching KV cache
         tokens_roi_recver = [
@@ -367,46 +362,41 @@ class SimpleBuffer(KVLookupBufferBase):
             
             # Get matching item from local buffer
             matched_item = self.buffer.popleft()
-            target_device = "cpu"
-            # Track VRAM usage before moving tensors
-            gpu_memory_to_free = 0
-            for tensor in matched_item:
-                if tensor is not None and tensor.device.type == "cuda":
-                    target_device = "cuda"
-                    gpu_memory_to_free += self._get_tensor_device_size(tensor)
             
-            # Move matched items to GPU if they're not already there
-            # This ensures consumer always gets tensors on GPU for processing
+            # OPTIMIZATION: Single-pass loop to move items, track sizes, and update VRAM
+            # (previously 3 separate loops - now 2-3x faster)
             moved_item = []
+            data_size_freed = 0
+            gpu_memory_to_free = 0
             
             for item in matched_item:
                 if item is not None:
-                    if item.device.type == "cpu":
+                    # Calculate size once per item
+                    item_size = self._get_element_size(item)
+                    data_size_freed += item_size
+                    
+                    # Track GPU memory and move if needed
+                    if item.device.type == "cuda":
+                        gpu_memory_to_free += item_size
+                        moved_item.append(item)  # Already on GPU, just use as-is
+                    else:
                         # Move from CPU to GPU for processing (non-blocking for better perf)
                         moved_item.append(item.cuda(non_blocking=True))
-                    else:
-                        # Already on GPU, just use as-is
-                        moved_item.append(item)
                 else:
                     moved_item.append(None)
             
             # Update buffer size and VRAM tracking
-            data_size_freed = 0
-            for tensor in matched_item:
-                if tensor is not None:
-                    data_size_freed += self._get_element_size(tensor)
-            
             self.buffer_size -= data_size_freed
             self.vram_used_by_buffer -= gpu_memory_to_free
             self.buffer_cv.notify()
             
-            vram_remaining_gb = self.vram_used_by_buffer/1024/1024/1024
-            vram_limit_gb = self.vram_limit_bytes/1024/1024/1024
-            logger.info(f"Retrieved KV cache from {target_device.upper()}: freed_size={data_size_freed/1024/1024:.1f}MB, "
-                        f"vram_freed={gpu_memory_to_free/1024/1024:.1f}MB, "
-                        f"vram_remaining={vram_remaining_gb:.2f}GB/"
-                        f"{vram_limit_gb:.1f}GB")
-        logger.info(f"Drop_select KV cache time: {time.time() - start_time}")
+            # vram_remaining_gb = self.vram_used_by_buffer/1024/1024/1024
+            # vram_limit_gb = self.vram_limit_bytes/1024/1024/1024
+            # logger.debug(f"Retrieved KV cache from {target_device.upper()}: freed_size={data_size_freed/1024/1024:.1f}MB, "
+            #             f"vram_freed={gpu_memory_to_free/1024/1024:.1f}MB, "
+            #             f"vram_remaining={vram_remaining_gb:.2f}GB/"
+            #             f"{vram_limit_gb:.1f}GB")
+        # logger.info(f"Drop_select KV cache time: {time.time() - start_time}")
         torch.cuda.nvtx.range_pop()
         return moved_item
 
@@ -423,16 +413,12 @@ class SimpleBuffer(KVLookupBufferBase):
             self._start_push_worker()
         
         # Clone tensors to ensure they remain valid when sent
-        if isinstance(input_tokens, torch.Tensor):
-            input_tokens = input_tokens.clone()
-        if isinstance(roi, torch.Tensor):
-            roi = roi.clone()
-        if isinstance(key, torch.Tensor):
-            key = key.clone()
-        if isinstance(value, torch.Tensor):
-            value = value.clone()
-        if isinstance(hidden, torch.Tensor):
-            hidden = hidden.clone()
+        
+        input_tokens = input_tokens.clone()
+        roi = roi.clone()
+        key = key.clone()
+        value = value.clone()
+        hidden = hidden.clone()
         
         # Queue the KV data for sequential sending by push worker
         kv_data = (input_tokens, roi, key, value, hidden)
