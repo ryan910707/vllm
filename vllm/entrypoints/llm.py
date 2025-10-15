@@ -1365,9 +1365,15 @@ class LLM:
     def _run_engine(
             self, *, use_tqdm: bool
     ) -> list[Union[RequestOutput, PoolingRequestOutput]]:
+        import time
+        
+        # Add total prefill timing
+        total_start_time = time.time()
+        num_requests = self.llm_engine.get_num_unfinished_requests()
+        logger.info(f"TOTAL PREFILL START: Processing {num_requests} prompts")
+        
         # Initialize tqdm.
         if use_tqdm:
-            num_requests = self.llm_engine.get_num_unfinished_requests()
             pbar = tqdm(
                 total=num_requests,
                 desc="Processed prompts",
@@ -1380,10 +1386,17 @@ class LLM:
         outputs: list[Union[RequestOutput, PoolingRequestOutput]] = []
         total_in_toks = 0
         total_out_toks = 0
+        completed_requests = 0
+        
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 if output.finished:
+                    completed_requests += 1
+                    current_time = time.time()
+                    elapsed_time = current_time - total_start_time
+                    logger.info(f"PREFILL PROGRESS: Completed {completed_requests}/{num_requests} prompts in {elapsed_time:.3f}s")
+                    
                     outputs.append(output)
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
@@ -1402,6 +1415,10 @@ class LLM:
                             pbar.update(n)
                         else:
                             pbar.update(1)
+
+        total_end_time = time.time()
+        total_time = total_end_time - total_start_time
+        logger.info(f"TOTAL PREFILL COMPLETE: All {num_requests} prompts processed in {total_time:.3f}s")
 
         if use_tqdm:
             pbar.close()
