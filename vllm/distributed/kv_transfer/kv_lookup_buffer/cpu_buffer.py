@@ -196,6 +196,7 @@ class CpuBuffer(KVLookupBufferBase):
         assert self.request_handling_thread is None, \
             "drop_select should be called by the KV cache consumer "\
             "(e.g. the decode vLLM instance)"
+        start_time = time.time()
 
         if isinstance(input_tokens, torch.Tensor):
             input_tokens = input_tokens.clone()
@@ -216,7 +217,7 @@ class CpuBuffer(KVLookupBufferBase):
         value = self.data_pipe.recv_tensor()
         hidden = self.data_pipe.recv_tensor()
         torch.cuda.nvtx.range_pop()
-        
+        logger.info(f"Drop_select KV cache time: {time.time() - start_time}")
         return [input_tokens, roi, key, value, hidden]
 
     def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
