@@ -203,3 +203,4 @@ benchmarks/**/*.json
 # Linting
 actionlint
 shellcheck*/
+*.json
