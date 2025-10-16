@@ -219,7 +219,7 @@ class SimpleBuffer(KVLookupBufferBase):
             while self.push_worker_running:
                 try:
                     # Wait for KV data to send (with timeout to check shutdown)
-                    kv_data = self.push_queue.get(timeout=1.0)
+                    kv_data = self.push_queue.get(timeout=0.1)
                     
                     if kv_data is None:  # Shutdown signal
                         break
@@ -328,6 +328,7 @@ class SimpleBuffer(KVLookupBufferBase):
             roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
         
         torch.cuda.nvtx.range_push("drop_select")
+        start_time = time.time()
 
         # Query the local buffer for matching KV cache
         tokens_roi_recver = [
@@ -396,7 +397,7 @@ class SimpleBuffer(KVLookupBufferBase):
             #             f"vram_freed={gpu_memory_to_free/1024/1024:.1f}MB, "
             #             f"vram_remaining={vram_remaining_gb:.2f}GB/"
             #             f"{vram_limit_gb:.1f}GB")
-        # logger.info(f"Drop_select KV cache time: {time.time() - start_time}")
+        logger.info(f"Drop_select KV cache time: {time.time() - start_time}")
         torch.cuda.nvtx.range_pop()
         return moved_item
 
