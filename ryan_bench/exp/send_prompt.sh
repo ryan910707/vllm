@@ -9,7 +9,7 @@ benchmark() {
   # dataset_path="./sonnet_4x.txt"
   num_prompts=10
   qps=2
-  input_len=256
+  input_len=2560
   output_len=16
   prefix_len=0
   tag="test"
@@ -23,7 +23,6 @@ benchmark() {
           --random-output-len $output_len \
           --random-prefix-len $prefix_len \
           --port 8000 \
-          --save-result \
           --result-dir $results_folder \
           --result-filename "$tag"-qps-"$qps".json \
           --request-rate "$qps"

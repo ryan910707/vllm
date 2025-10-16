@@ -195,12 +195,12 @@ class SimpleBuffer(KVLookupBufferBase):
             self.buffer.append(buffer_item)
             self.buffer_cv.notify()
             
-            vram_used_gb = self.vram_used_by_buffer/1024/1024/1024
-            vram_limit_gb = self.vram_limit_bytes/1024/1024/1024
-            logger.info(f"Stored KV cache on {target_device.upper()}: "
-                        f"data_size={data_size/1024/1024:.1f}MB, "
-                        f"vram_used={vram_used_gb:.2f}GB/"
-                        f"{vram_limit_gb:.1f}GB")
+            # vram_used_gb = self.vram_used_by_buffer/1024/1024/1024
+            # vram_limit_gb = self.vram_limit_bytes/1024/1024/1024
+            # logger.info(f"Stored KV cache on {target_device.upper()}: "
+            #             f"data_size={data_size/1024/1024:.1f}MB, "
+            #             f"vram_used={vram_used_gb:.2f}GB/"
+            #             f"{vram_limit_gb:.1f}GB")
 
     def _is_end_signal(self, signal):
         return signal is None
@@ -219,25 +219,11 @@ class SimpleBuffer(KVLookupBufferBase):
             while self.push_worker_running:
                 try:
                     # Wait for KV data to send (with timeout to check shutdown)
-                    kv_data = self.push_queue.get(timeout=0.1)
-                    
-                    if kv_data is None:  # Shutdown signal
-                        break
-                        
-                    # Send KV data atomically
-                    input_tokens, roi, key, value, hidden = kv_data
-                    self._send_kv_data_atomic(input_tokens, roi, key, value, hidden)
-                    
-                    # Mark task as done
+                    kv_data = self.push_queue.get(block=True, timeout=15.0)
+                    self._send_kv_data_atomic(*kv_data)
                     self.push_queue.task_done()
-                    
-                except queue.Empty:
-                    # Timeout occurred, continue to check shutdown
-                    continue
-                except Exception as e:
+                except (queue.Empty, Exception) as e:
                     logger.error(f"Error in push worker: {e}")
-                    # Continue processing other items
-                    continue
             
             logger.debug("Push worker thread finished")
         
@@ -356,7 +342,7 @@ class SimpleBuffer(KVLookupBufferBase):
 
         with self.buffer_cv:
             while not is_buffer_available(tokens_roi_recver):
-                logger.debug("KV transfer buffer is not available. Waiting...")
+                logger.info("KV transfer buffer is not available. Waiting...")
                 torch.cuda.nvtx.range_push("drop_select_wait")
                 self.buffer_cv.wait()
                 torch.cuda.nvtx.range_pop()
