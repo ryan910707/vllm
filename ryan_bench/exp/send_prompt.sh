@@ -8,9 +8,9 @@ benchmark() {
   dataset_name="random"
   # dataset_path="./sonnet_4x.txt"
   num_prompts=10
-  qps=2
-  input_len=2560
-  output_len=16
+  qps=1
+  input_len=28000
+  output_len=32
   prefix_len=0
   tag="test"
 
