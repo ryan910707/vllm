@@ -26,12 +26,12 @@ logger = logging.getLogger(__name__)
 NUM_PROMPTS = 10
 PROMPT_LENGTH = 128  # target character length
 OUTPUT_LEN = 128
-BUFFER_SIZE = 8930*(256+5)
-QPS = 10.0  # Queries per second (0 = no rate limiting, send as fast as possible)
+BUFFER_SIZE = 8930*(256+5)*2
+QPS = 2.0  # Queries per second (0 = no rate limiting, send as fast as possible)
 
 # Simple word list for generating prompts
 WORDS = ["the", "cat", "dog", "tree", "house", "car", "sun", "moon", "water", 
-         "fire", "mountain", "ocean", "flower", "stone", "cloud", "light", 
+         "fire", "mountain", "ocean", "flower", "stone", "cloud", "light",  
          "fast", "slow", "happy", "bright", "walk", "run", "jump", "dance", 
          "think", "create"]
 
@@ -219,11 +219,18 @@ def run_decode(prefill_done_event, decode_done_event, start_time_shared,
     ttft_req0 = ttft_req0_shared.value
     ttfts.insert(0, ttft_req0)
     
+    # Calculate throughput
+    total_tokens = NUM_PROMPTS * (PROMPT_LENGTH + OUTPUT_LEN)
+    throughput = total_tokens / e2e_duration
+    
     logger.info("Decode generation loop completed")
     logger.info(f"Decode total time: {total_duration:.2f}s")
     logger.info("=" * 60)
     logger.info(f"END-TO-END TIME: {e2e_duration:.2f}s")
     logger.info(f"PREFILL END to DECODE END: {prefill_to_decode_duration:.2f}s")
+    logger.info("=" * 60)
+    logger.info(f"THROUGHPUT: {throughput:.2f} tokens/s "
+                f"({total_tokens} tokens / {e2e_duration:.2f}s)")
     logger.info("=" * 60)
     
     # TTFT statistics
