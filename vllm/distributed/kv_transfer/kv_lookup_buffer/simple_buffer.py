@@ -115,7 +115,7 @@ class SimpleBuffer(KVLookupBufferBase):
 
         buffer_item = [input_tokens, roi, key, value, hidden]
         data_size = sum([self._get_element_size(data) for data in buffer_item])
-        logger.info(f"Data size: {data_size}")
+        # logger.info(f"Data size: {data_size}")
 
         with self.buffer_cv:
             if self.buffer_size + data_size > self.buffer_size_threshold:
@@ -184,7 +184,7 @@ class SimpleBuffer(KVLookupBufferBase):
             data_size = sum([self._get_element_size(data) for data in buffer_item])
             
             # Query buffer status and wait until there's enough space
-            logger.info(f"Checking buffer status for data size: {data_size}")
+            logger.debug(f"Checking buffer status for data size: {data_size}")
             start_wait_time = time.time()
             
             has_waited = False
@@ -263,7 +263,7 @@ class SimpleBuffer(KVLookupBufferBase):
                         
                         # Add to local buffer
                         self._add_to_buffer(input_tokens, roi, key, value, hidden)
-                        logger.info("Received and buffered KV cache from producer")
+                        logger.debug("Received and buffered KV cache from producer")
                     
                 except (RuntimeError, torch.distributed.DistNetworkError) as e:
                     if any(msg in str(e) for msg in ['Connection closed by peer', 'Connection reset by peer']):
@@ -330,7 +330,7 @@ class SimpleBuffer(KVLookupBufferBase):
             self.buffer_cv.notify()
 
         torch.cuda.nvtx.range_pop()
-        logger.info("Drop-selected KV cache from buffer")
+        logger.debug("Drop-selected KV cache from buffer")
         return matched_item
 
     def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
