@@ -14,6 +14,8 @@ from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 
 
+MODEL = os.environ.get("VLLM_MODEL")
+
 prompts = [
         "The cat sat on mat",
         "Five dogs ran past me", 
@@ -46,7 +48,7 @@ def run_prefill():
 
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.
-    llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
+    llm = LLM(model=MODEL,
               kv_transfer_config=ktc,
               max_model_len=2000,
               dtype="half",
@@ -86,7 +88,7 @@ def run_decode():
     )
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.
-    llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
+    llm = LLM(model=MODEL,
               kv_transfer_config=ktc,
               max_model_len=2000,
               dtype= "half",

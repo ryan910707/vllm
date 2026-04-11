@@ -1370,7 +1370,7 @@ class LLM:
         # Add total prefill timing
         total_start_time = time.time()
         num_requests = self.llm_engine.get_num_unfinished_requests()
-        logger.info(f"TOTAL PREFILL START: Processing {num_requests} prompts")
+        # logger.info(f"TOTAL PREFILL START: Processing {num_requests} prompts")
         
         # Initialize tqdm.
         if use_tqdm:
@@ -1395,7 +1395,7 @@ class LLM:
                     completed_requests += 1
                     current_time = time.time()
                     elapsed_time = current_time - total_start_time
-                    logger.info(f"PREFILL PROGRESS: Completed {completed_requests}/{num_requests} prompts in {elapsed_time:.3f}s")
+                    # logger.info(f"PREFILL PROGRESS: Completed {completed_requests}/{num_requests} prompts in {elapsed_time:.3f}s")
                     
                     outputs.append(output)
                     if use_tqdm:
@@ -1418,7 +1418,6 @@ class LLM:
 
         total_end_time = time.time()
         total_time = total_end_time - total_start_time
-        logger.info(f"TOTAL PREFILL COMPLETE: All {num_requests} prompts processed in {total_time:.3f}s")
 
         if use_tqdm:
             pbar.close()

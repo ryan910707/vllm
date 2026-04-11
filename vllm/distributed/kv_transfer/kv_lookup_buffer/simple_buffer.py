@@ -31,7 +31,7 @@ class SimpleBuffer(KVLookupBufferBase):
 
     def __init__(self, signal_pipe: KVPipeBase, data_pipe: KVPipeBase,
                  buffer_size_thresh: float, 
-                 vram_limit_gb: float = 2,
+                 vram_limit_gb: float = 50,
                  role: Optional[str] = None):
         """
         signal_pipe: on CPU
@@ -343,9 +343,10 @@ class SimpleBuffer(KVLookupBufferBase):
         with self.buffer_cv:
             while not is_buffer_available(tokens_roi_recver):
                 logger.info("KV transfer buffer is not available. Waiting...")
-                torch.cuda.nvtx.range_push("drop_select_wait")
+                wait_time = time.time() 
                 self.buffer_cv.wait()
-                torch.cuda.nvtx.range_pop()
+                wait_time = time.time() - wait_time
+                logger.info(f"Drop_select KV cache wait time: {wait_time}")
             
             # Get matching item from local buffer
             matched_item = self.buffer.popleft()

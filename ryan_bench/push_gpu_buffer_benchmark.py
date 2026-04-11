@@ -22,12 +22,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+MODEL = os.environ.get("VLLM_MODEL")
+
 # Configuration - modify these values directly
 NUM_PROMPTS = 10
-PROMPT_LENGTH = 128  # target character length
-OUTPUT_LEN = 128
-BUFFER_SIZE = 8930*(256+5)
-QPS = 2.0  # Queries per second (0 = no rate limiting, send as fast as possible)
+PROMPT_LENGTH =  1024  # target character length
+OUTPUT_LEN = 16
+BUFFER_SIZE = 160000*(160+1) # not used in cpu_push_mode
+QPS = 12.0  # Queries per second (0 = no rate limiting, send as fast as possible)
 
 # Simple word list for generating prompts
 WORDS = ["the", "cat", "dog", "tree", "house", "car", "sun", "moon", "water", 
@@ -90,10 +92,11 @@ def run_prefill(prefill_done_event, decode_done_event):
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.
     logger.info("Initializing prefill model")
-    llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
+    llm = LLM(model=MODEL,
               kv_transfer_config=ktc,
+              max_model_len=2048,
               dtype="half",
-              gpu_memory_utilization=0.7)
+              gpu_memory_utilization=0.95)
     logger.info("Prefill model initialized")
 
     logger.info("Starting prefill generation loop")
@@ -112,7 +115,7 @@ def run_prefill(prefill_done_event, decode_done_event):
         
         request_start = time.time()
         logger.info(f"Processing prefill prompt {i}")
-        llm.generate([prompt_text], sampling_params) # Pass a list with a single prompt
+        llm.generate([prompt_text], sampling_params, use_tqdm=False)
         request_duration = time.time() - request_start
         logger.info(f"Completed prefill prompt {i} in {request_duration:.3f}s")
     
@@ -156,10 +159,11 @@ def run_decode(prefill_done_event, decode_done_event):
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.
     logger.info("Initializing decode model")
-    llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
+    llm = LLM(model=MODEL,
               kv_transfer_config=ktc,
+              max_model_len=2048,
               dtype= "half",
-              gpu_memory_utilization=0.7)
+              gpu_memory_utilization=0.95)
     logger.info("Decode model initialized")
 
     logger.info("Starting decode generation loop")
@@ -183,7 +187,7 @@ def run_decode(prefill_done_event, decode_done_event):
             # (pushed by the prefill node to our local buffer).
             request_start = time.time()
             logger.info(f"Processing decode prompt {i}")
-            outputs = llm.generate([prompt_text], sampling_params) # Pass a list with a single prompt
+            outputs = llm.generate([prompt_text], sampling_params, use_tqdm=False)
             request_duration = time.time() - request_start
             latencies.append(request_duration)
             logger.info(f"Completed decode prompt {i} in {request_duration:.3f}s")
@@ -204,11 +208,11 @@ def run_decode(prefill_done_event, decode_done_event):
     logger.info(f"Decode actual QPS: {actual_qps:.2f} (target: {QPS if QPS > 0 else 'unlimited'})")
     logger.info(f"Decode latency - avg: {avg_latency:.3f}s, min: {min_latency:.3f}s, max: {max_latency:.3f}s")
 
-    logger.info("--- Decode Node: Final Outputs ---")
-    for output in all_outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        logger.info(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    # logger.info("--- Decode Node: Final Outputs ---")
+    # for output in all_outputs:
+    #     prompt = output.prompt
+    #     generated_text = output.outputs[0].text
+    #     logger.info(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     
     logger.info("Decode node finished processing")
     
@@ -219,12 +223,13 @@ def run_decode(prefill_done_event, decode_done_event):
 
 if __name__ == "__main__":
     logger.info("=== Push GPU Buffer Benchmark ===")
+    logger.info(f"Model (VLLM_MODEL): {MODEL}")
     logger.info(f"Config: {NUM_PROMPTS} prompts, length {PROMPT_LENGTH} chars")
     logger.info(f"Target QPS: {QPS if QPS > 0 else 'unlimited (no rate limiting)'}")
     logger.info(f"Buffer size: {BUFFER_SIZE}")
-    logger.info("Generated prompts:")
-    for i, prompt in enumerate(prompts):
-        logger.info(f"  {i+1}: {prompt[:50]}... (len: {len(prompt)})")
+    # logger.info("Generated prompts:")
+    # for i, prompt in enumerate(prompts):
+    #     logger.info(f"  {i+1}: {prompt[:50]}... (len: {len(prompt)})")
     
     logger.info("Starting benchmark")
     
@@ -244,11 +249,11 @@ if __name__ == "__main__":
     # Wait for prefill to exit first (it waits for decode to signal completion)
     logger.info("Waiting for prefill process to complete...")
     prefill_process.join()
-    logger.info("Prefill process completed")
+    # logger.info("Prefill process completed")
     
-    # Then wait for decode process to finish
-    logger.info("Waiting for decode process to complete...")
+    # # Then wait for decode process to finish
+    # logger.info("Waiting for decode process to complete...")
     decode_process.join()
-    logger.info("Decode process completed")
+    # logger.info("Decode process completed")
     
-    logger.info("Benchmark completed successfully!")
+    # logger.info("Benchmark completed successfully!")
