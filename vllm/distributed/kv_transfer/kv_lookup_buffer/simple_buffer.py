@@ -330,7 +330,7 @@ class SimpleBuffer(KVLookupBufferBase):
             self.buffer_cv.notify()
 
         torch.cuda.nvtx.range_pop()
-        logger.debug("Drop-selected KV cache from buffer")
+        logger.info("Drop-selected KV cache from buffer")
         return matched_item
 
     def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,

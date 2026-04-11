@@ -5,6 +5,7 @@ In this benchmark, we will use push-based KV transfer.
 Prefill worker immediately sends KV caches to decode worker's buffer,
 allowing prefill worker to exit after completing all requests.
 """
+import argparse
 import os
 import logging
 import random
@@ -22,16 +23,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuration - modify these values directly
-NUM_PROMPTS = 10
-PROMPT_LENGTH = 128  # target character length
-OUTPUT_LEN = 128
-BUFFER_SIZE = 8930*(256+5)*2
-QPS = 2.0  # Queries per second (0 = no rate limiting, send as fast as possible)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Push GPU Buffer Benchmark")
+    parser.add_argument("--model", type=str, default=os.environ.get("VLLM_MODEL"),
+                        help="Model name or path (default: $VLLM_MODEL)")
+    parser.add_argument("--num-prompts", type=int, default=10,
+                        help="Number of prompts (default: 10)")
+    parser.add_argument("--prompt-length", type=int, default=16,
+                        help="Target prompt length in characters (default: 16)")
+    parser.add_argument("--output-len", type=int, default=96,
+                        help="Number of output tokens (default: 96)")
+    parser.add_argument("--buffer-size", type=int, default=160000*(256+1),
+                        help="KV transfer buffer size (default: 160000*257, not used in cpu_push_mode)")
+    parser.add_argument("--qps", type=float, default=12.0,
+                        help="Target queries per second, 0 = unlimited (default: 12.0)")
+    return parser.parse_args()
+
+args = parse_args()
+MODEL = args.model
+NUM_PROMPTS = args.num_prompts
+PROMPT_LENGTH = args.prompt_length
+OUTPUT_LEN = args.output_len
+BUFFER_SIZE = args.buffer_size
+QPS = args.qps
 
 # Simple word list for generating prompts
 WORDS = ["the", "cat", "dog", "tree", "house", "car", "sun", "moon", "water", 
-         "fire", "mountain", "ocean", "flower", "stone", "cloud", "light",  
+         "fire", "mountain", "ocean", "flower", "stone", "cloud", "light", 
          "fast", "slow", "happy", "bright", "walk", "run", "jump", "dance", 
          "think", "create"]
 
@@ -64,12 +82,11 @@ def generate_prompts():
 
 prompts = generate_prompts()
 
-def run_prefill(prefill_done_event, decode_done_event, start_time_shared, 
-                prefill_end_time_shared, ttft_req0_shared):
+def run_prefill(prefill_done_event, decode_done_event):
     logger.info("Prefill node starting")
     
     # We use GPU 0 for prefill node.
-    os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
     # The prefill node processes requests and immediately pushes
     # KV caches to the decode node's buffer.
@@ -91,16 +108,14 @@ def run_prefill(prefill_done_event, decode_done_event, start_time_shared,
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.
     logger.info("Initializing prefill model")
-    llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
+    llm = LLM(model=MODEL,
               kv_transfer_config=ktc,
+              max_model_len=2048,
               dtype="half",
-              gpu_memory_utilization=0.7)
+              gpu_memory_utilization=0.95)
     logger.info("Prefill model initialized")
-    e2e_start = time.time()
-    start_time_shared.value = e2e_start  # Share start time with decode process
 
     logger.info("Starting prefill generation loop")
-    logger.info("=" * 60)
     start_time = time.time()
     
     for i, prompt_text in enumerate(prompts):
@@ -116,19 +131,15 @@ def run_prefill(prefill_done_event, decode_done_event, start_time_shared,
         
         request_start = time.time()
         logger.info(f"Processing prefill prompt {i}")
-        llm.generate([prompt_text], sampling_params) # Pass a list with a single prompt
+        llm.generate([prompt_text], sampling_params, use_tqdm=False)
         request_duration = time.time() - request_start
         logger.info(f"Completed prefill prompt {i} in {request_duration:.3f}s")
-        
-        # For request 0, calculate TTFT here in prefill and share it
-        if i == 0:
-            ttft_req0 = request_duration
-            ttft_req0_shared.value = ttft_req0
     
     total_duration = time.time() - start_time
-    prefill_end = time.time()
-    prefill_end_time_shared.value = prefill_end  # Share prefill end time
+    actual_qps = NUM_PROMPTS / total_duration if total_duration > 0 else 0
     logger.info(f"Prefill generation loop completed in {total_duration:.2f}s")
+    logger.info(f"Prefill actual QPS: {actual_qps:.2f} (target: {QPS if QPS > 0 else 'unlimited'})")
+    
     logger.info("Prefill node is finished with all prompts")
     
     # Signal that prefill is done
@@ -142,8 +153,7 @@ def run_prefill(prefill_done_event, decode_done_event, start_time_shared,
     logger.info("Prefill node exiting cleanly")
 
 
-def run_decode(prefill_done_event, decode_done_event, start_time_shared,
-                prefill_end_time_shared, ttft_req0_shared):
+def run_decode(prefill_done_event, decode_done_event):
     logger.info("Decode node starting")
     
     # We use GPU 1 for decode node.
@@ -165,16 +175,17 @@ def run_decode(prefill_done_event, decode_done_event, start_time_shared,
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.
     logger.info("Initializing decode model")
-    llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
+    llm = LLM(model=MODEL,
               kv_transfer_config=ktc,
+              max_model_len=2048,
               dtype= "half",
-              gpu_memory_utilization=0.7)
+              gpu_memory_utilization=0.95)
     logger.info("Decode model initialized")
 
     logger.info("Starting decode generation loop")
     all_outputs = []
     start_time = time.time()
-    ttfts = []  # Track TTFT for each request
+    latencies = []
     
     try:
         for i, prompt_text in enumerate(prompts):
@@ -191,16 +202,10 @@ def run_decode(prefill_done_event, decode_done_event, start_time_shared,
             # At this point the kv-cache for this specific prompt should have been transferred
             # (pushed by the prefill node to our local buffer).
             request_start = time.time()
-            
-            # Calculate TTFT (skip request 0, will add it at the end)
-            if i > 0:
-                # For requests > 0, TTFT is time from e2e_start to when decode starts
-                ttft = request_start - start_time_shared.value
-                ttfts.append(ttft)
-            
             logger.info(f"Processing decode prompt {i}")
-            outputs = llm.generate([prompt_text], sampling_params) # Pass a list with a single prompt
+            outputs = llm.generate([prompt_text], sampling_params, use_tqdm=False)
             request_duration = time.time() - request_start
+            latencies.append(request_duration)
             logger.info(f"Completed decode prompt {i} in {request_duration:.3f}s")
 
             all_outputs.extend(outputs)
@@ -209,40 +214,23 @@ def run_decode(prefill_done_event, decode_done_event, start_time_shared,
         # Continue with whatever outputs we have
     
     total_duration = time.time() - start_time
-    e2e_end = time.time()
-    e2e_duration = e2e_end - start_time_shared.value
-    
-    # Calculate time from prefill end to decode end
-    prefill_to_decode_duration = e2e_end - prefill_end_time_shared.value
-    
-    # Add request 0's TTFT at the beginning (calculated in prefill)
-    ttft_req0 = ttft_req0_shared.value
-    ttfts.insert(0, ttft_req0)
-    
-    # Calculate throughput
-    total_tokens = NUM_PROMPTS * (PROMPT_LENGTH + OUTPUT_LEN)
-    throughput = total_tokens / e2e_duration
+    actual_qps = NUM_PROMPTS / total_duration if total_duration > 0 else 0
+    avg_latency = sum(latencies) / len(latencies) if latencies else 0
+    min_latency = min(latencies) if latencies else 0
+    max_latency = max(latencies) if latencies else 0
     
     logger.info("Decode generation loop completed")
     logger.info(f"Decode total time: {total_duration:.2f}s")
-    logger.info("=" * 60)
-    logger.info(f"END-TO-END TIME: {e2e_duration:.2f}s")
-    logger.info(f"PREFILL END to DECODE END: {prefill_to_decode_duration:.2f}s")
-    logger.info("=" * 60)
-    logger.info(f"THROUGHPUT: {throughput:.2f} tokens/s "
-                f"({total_tokens} tokens / {e2e_duration:.2f}s)")
-    logger.info("=" * 60)
+    logger.info(f"Decode actual QPS: {actual_qps:.2f} (target: {QPS if QPS > 0 else 'unlimited'})")
+    logger.info(f"Decode latency - avg: {avg_latency:.3f}s, min: {min_latency:.3f}s, max: {max_latency:.3f}s")
+
+    # logger.info("--- Decode Node: Final Outputs ---")
+    # for output in all_outputs:
+    #     prompt = output.prompt
+    #     generated_text = output.outputs[0].text
+    #     logger.info(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     
-    # TTFT statistics
-    if ttfts:
-        logger.info("=" * 60)
-        logger.info("TTFT (Time to First Token) Statistics:")
-        logger.info(f"Total number of requests: {len(ttfts)}")
-        for idx, ttft in enumerate(ttfts):
-            logger.info(f"  Request {idx} TTFT: {ttft:.3f}s")
-        avg_ttft = sum(ttfts) / len(ttfts)
-        logger.info(f"Average TTFT: {avg_ttft:.3f}s")
-        logger.info("=" * 60)
+    logger.info("Decode node finished processing")
     
     # Signal that decode is completely done
     decode_done_event.set()
@@ -250,7 +238,13 @@ def run_decode(prefill_done_event, decode_done_event, start_time_shared,
 
 
 if __name__ == "__main__":
-    from multiprocessing import Value
+    logger.info("=== Push GPU Buffer Benchmark ===")
+    logger.info(f"Model (VLLM_MODEL): {MODEL}")
+    logger.info(f"CONFIG num_prompts={NUM_PROMPTS} prompt_length={PROMPT_LENGTH} output_len={OUTPUT_LEN} qps={QPS} buffer_size={BUFFER_SIZE}")
+    logger.info(f"Buffer size: {BUFFER_SIZE}")
+    # logger.info("Generated prompts:")
+    # for i, prompt in enumerate(prompts):
+    #     logger.info(f"  {i+1}: {prompt[:50]}... (len: {len(prompt)})")
     
     logger.info("Starting benchmark")
     
@@ -258,28 +252,22 @@ if __name__ == "__main__":
     prefill_done_event = Event()
     decode_done_event = Event()
     
-    # Shared values for timing
-    start_time_shared = Value('d', 0.0)  # E2E start time
-    prefill_end_time_shared = Value('d', 0.0)  # Prefill end time
-    ttft_req0_shared = Value('d', 0.0)  # TTFT for request 0 (calculated in prefill)
-    
-    prefill_process = Process(target=run_prefill, 
-                             args=(prefill_done_event, decode_done_event, 
-                                   start_time_shared, prefill_end_time_shared,
-                                   ttft_req0_shared))
-    decode_process = Process(target=run_decode, 
-                            args=(prefill_done_event, decode_done_event, 
-                                  start_time_shared, prefill_end_time_shared,
-                                  ttft_req0_shared))
+    logger.info("Creating processes")
+    prefill_process = Process(target=run_prefill, args=(prefill_done_event, decode_done_event))
+    decode_process = Process(target=run_decode, args=(prefill_done_event, decode_done_event))
 
     logger.info("Starting processes")
+    # Start both processes
     prefill_process.start()
     decode_process.start()
 
     # Wait for prefill to exit first (it waits for decode to signal completion)
+    logger.info("Waiting for prefill process to complete...")
     prefill_process.join()
+    # logger.info("Prefill process completed")
     
-    # Then wait for decode process to finish
+    # # Then wait for decode process to finish
+    # logger.info("Waiting for decode process to complete...")
     decode_process.join()
     # logger.info("Decode process completed")
     
