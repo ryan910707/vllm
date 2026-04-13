@@ -1053,6 +1053,11 @@ def get_tensor_model_parallel_rank():
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
+    global _KV_TRANSFER
+    if _KV_TRANSFER is not None:
+        _KV_TRANSFER.close()
+        _KV_TRANSFER = None
+
     global _TP
     if _TP:
         _TP.destroy()
